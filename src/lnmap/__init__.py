@@ -1,3 +1,11 @@
+"""
+lnmap - Core Library Module
+
+Provides core abstractions for finding, categorizing, and caching file system links,
+including hard links, symbolic links, and macOS file aliases.
+"""
+
+import os
 import sqlite3
 import sys
 from collections import defaultdict
@@ -6,8 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-__version__ = "0.4.0"
-DEFAULT_DB_NAME = ".lnmap_catalog.db"
+__version__ = "0.5.0"
+DEFAULT_DB_NAME = ".lnmap_index.db"
 PROGRESS_INTERVAL = 1000
 
 UpdateMode = str | Iterable[str] | bool
@@ -42,293 +50,300 @@ class Link:
         return self.key if isinstance(self.key, Path) else None
 
 
-def _parse_update_modes(update: UpdateMode) -> set[str]:
-    """Parses update argument into a set of target link types to update ('hard', 'sym', 'alias')."""
-    if isinstance(update, bool):
-        return {"hard", "sym", "alias"} if update else set()
+class LinkMapper:
+    """Manages link scanning, caching, and database interaction for a given directory."""
 
-    if isinstance(update, str):
-        raw_items = [item.strip() for item in update.split(",") if item.strip()]
-    else:
-        raw_items = [str(item) for item in update]
+    def __init__(
+        self,
+        directory: str | Path,
+        db_path: str | Path | None = None,
+    ) -> None:
+        self.directory = Path(directory).resolve()
+        if not self.directory.is_dir():
+            raise ValueError(f"Target path '{directory}' is not a valid directory.")
 
-    valid_types = {"hard", "sym", "alias"}
-    valid_choices = valid_types | {"all", "none"}
-    targets: set[str] = set()
-    has_all = False
+        self.db_path = (
+            Path(db_path).resolve() if db_path else self.directory / DEFAULT_DB_NAME
+        )
 
-    for item in raw_items:
-        if item not in valid_choices:
-            raise ValueError(
-                f"Invalid update option '{item}'. Must be one or more of: hard, sym, alias, all, none."
-            )
-        if item == "all":
-            has_all = True
-        elif item != "none":
-            targets.add(item)
+    @classmethod
+    def indexes(cls, directory: str | Path) -> list[Path]:
+        """
+        Searches for index database files starting from the specified directory
+        and traversing up through parent directories.
+        """
+        target_dir = Path(directory).resolve()
+        if not target_dir.is_dir():
+            raise ValueError(f"Target path '{directory}' is not a valid directory.")
 
-    if has_all:
-        return {"hard", "sym", "alias"}
+        current = target_dir
+        found_indexes: list[Path] = []
 
-    return targets
+        while True:
+            candidate = current / DEFAULT_DB_NAME
+            if candidate.is_file():
+                found_indexes.append(candidate)
 
+            if current.parent == current:
+                break
+            current = current.parent
 
-def _load_from_db(db_path: Path) -> list[Link] | None:
-    try:
-        with sqlite3.connect(db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('hard_links', 'sym_links', 'alias_links');"
-            )
-            tables = {row[0] for row in cursor.fetchall()}
-            if "hard_links" not in tables or "sym_links" not in tables:
-                return None
+        return found_indexes
 
-            cursor.execute("SELECT inode, path FROM hard_links ORDER BY inode, path;")
-            hard_rows = cursor.fetchall()
+    @classmethod
+    def _parse_update_modes(cls, update: UpdateMode) -> set[str]:
+        """Parses update argument into a set of target link types to update ('hard', 'sym', 'alias')."""
+        if isinstance(update, bool):
+            return {"hard", "sym", "alias"} if update else set()
 
-            cursor.execute("SELECT target, path FROM sym_links ORDER BY target, path;")
-            sym_rows = cursor.fetchall()
+        if isinstance(update, str):
+            raw_items = [item.strip() for item in update.split(",") if item.strip()]
+        else:
+            raw_items = [str(item) for item in update]
 
-            alias_rows = []
-            if "alias_links" in tables:
-                cursor.execute(
-                    "SELECT target, path FROM alias_links ORDER BY target, path;"
+        valid_types = {"hard", "sym", "alias"}
+        valid_choices = valid_types | {"all", "none"}
+        targets: set[str] = set()
+        has_all = False
+
+        for item in raw_items:
+            if item not in valid_choices:
+                raise ValueError(
+                    f"Invalid update option '{item}'. Must be one or more of: hard, sym, alias, all, none."
                 )
-                alias_rows = cursor.fetchall()
+            if item == "all":
+                has_all = True
+            elif item != "none":
+                targets.add(item)
 
-        hard_map: dict[int, list[Path]] = defaultdict(list)
-        for inode, path_str in hard_rows:
-            hard_map[inode].append(Path(path_str))
+        if has_all:
+            return {"hard", "sym", "alias"}
 
-        sym_map: dict[Path, list[Path]] = defaultdict(list)
-        for target_str, path_str in sym_rows:
-            sym_map[Path(target_str)].append(Path(path_str))
+        return targets
 
-        alias_map: dict[Path, list[Path]] = defaultdict(list)
-        for target_str, path_str in alias_rows:
-            alias_map[Path(target_str)].append(Path(path_str))
-
-        links: list[Link] = []
-        for inode, paths in hard_map.items():
-            links.append(Link(link_type="hard", key=inode, paths=tuple(paths)))
-
-        for target, paths in sym_map.items():
-            links.append(Link(link_type="sym", key=target, paths=tuple(paths)))
-
-        for target, paths in alias_map.items():
-            links.append(Link(link_type="alias", key=target, paths=tuple(paths)))
-
-        return links
-    except sqlite3.Error:
-        return None
-
-
-def _save_to_db(
-    db_path: Path,
-    links: list[Link],
-    update_targets: set[str],
-) -> None:
-    with sqlite3.connect(db_path) as conn:
-        cursor = conn.cursor()
-
-        if "hard" in update_targets:
-            cursor.execute("DROP TABLE IF EXISTS hard_links;")
-            cursor.execute(
-                """
-                CREATE TABLE hard_links (
-                    inode INTEGER NOT NULL,
-                    path TEXT NOT NULL
-                );
-                """
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_hard_inode ON hard_links(inode);"
-            )
-            hard_records = [
-                (link.key, str(p))
-                for link in links
-                if link.link_type == "hard"
-                for p in link.paths
-            ]
-            cursor.executemany(
-                "INSERT INTO hard_links (inode, path) VALUES (?, ?);", hard_records
-            )
-
-        if "sym" in update_targets:
-            cursor.execute("DROP TABLE IF EXISTS sym_links;")
-            cursor.execute(
-                """
-                CREATE TABLE sym_links (
-                    target TEXT NOT NULL,
-                    path TEXT NOT NULL
-                );
-                """
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_sym_target ON sym_links(target);"
-            )
-            sym_records = [
-                (str(link.key), str(p))
-                for link in links
-                if link.link_type == "sym"
-                for p in link.paths
-            ]
-            cursor.executemany(
-                "INSERT INTO sym_links (target, path) VALUES (?, ?);", sym_records
-            )
-
-        if "alias" in update_targets:
-            cursor.execute("DROP TABLE IF EXISTS alias_links;")
-            cursor.execute(
-                """
-                CREATE TABLE alias_links (
-                    target TEXT NOT NULL,
-                    path TEXT NOT NULL
-                );
-                """
-            )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_alias_target ON alias_links(target);"
-            )
-            alias_records = [
-                (str(link.key), str(p))
-                for link in links
-                if link.link_type == "alias"
-                for p in link.paths
-            ]
-            cursor.executemany(
-                "INSERT INTO alias_links (target, path) VALUES (?, ?);", alias_records
-            )
-
-        conn.commit()
-
-
-def find_links(
-    directory: str | Path,
-    update: UpdateMode = "none",
-    progress: bool = False,
-    db_path: str | Path | None = None,
-) -> list[Link]:
-    """
-    Scans a directory recursively for hard links, symlinks, and macOS aliases.
-    Stores and retrieves results using an SQLite database cache.
-
-    Args:
-        directory: The root directory path to scan.
-        update: Cache update mode ('hard', 'sym', 'alias', 'all', 'none', or comma-separated combinations like 'hard,alias').
-        progress: If True, outputs progress updates to stderr during scanning.
-        db_path: Optional custom path to SQLite database. Defaults to <directory>/.lnmap_catalog.db.
-
-    Returns:
-        A list of Link objects representing hard links, symlinks, and macOS aliases.
-    """
-    root_path = Path(directory).resolve()
-    if not root_path.is_dir():
-        raise ValueError(f"Target path '{directory}' is not a valid directory.")
-
-    requested_targets = _parse_update_modes(update)
-
-    resolved_db_path = (
-        Path(db_path).resolve() if db_path else root_path / DEFAULT_DB_NAME
-    )
-
-    db_exists = resolved_db_path.exists()
-    cached_links: list[Link] | None = None
-    if db_exists:
-        cached_links = _load_from_db(resolved_db_path)
-
-    if cached_links is None:
-        update_targets = {"hard", "sym", "alias"}
-    else:
-        update_targets = requested_targets
-
-    if db_exists and not update_targets and cached_links is not None:
-        return cached_links
-
-    inode_map: dict[int, list[Path]] = defaultdict(list)
-    sym_map: dict[Path, list[Path]] = defaultdict(list)
-    alias_map: dict[Path, list[Path]] = defaultdict(list)
-    scanned_count = 0
-
-    for path in root_path.rglob("*"):
-        abs_p = path.absolute()
-        if abs_p == resolved_db_path:
-            continue
-
-        scanned_count += 1
-        if progress and (scanned_count % PROGRESS_INTERVAL == 0):
-            sys.stderr.write(f"\rScanning: {scanned_count} items processed...")
-            sys.stderr.flush()
-
+    def _save_to_db(
+        self,
+        hard_records: list[tuple[int, str]],
+        sym_records: list[tuple[str, str]],
+        alias_records: list[tuple[str, str]],
+        update_targets: set[str],
+    ) -> None:
+        """Updates the database with the provided link records."""
         try:
-            if "sym" in update_targets and path.is_symlink():
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                if "hard" in update_targets:
+                    cursor.execute("DROP TABLE IF EXISTS hard_links;")
+                    cursor.execute(
+                        """
+                        CREATE TABLE hard_links (
+                            inode INTEGER NOT NULL,
+                            path TEXT NOT NULL
+                        );
+                        """
+                    )
+                    cursor.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_hard_inode ON hard_links(inode);"
+                    )
+                    cursor.executemany(
+                        "INSERT INTO hard_links (inode, path) VALUES (?, ?);",
+                        hard_records,
+                    )
+
+                if "sym" in update_targets:
+                    cursor.execute("DROP TABLE IF EXISTS sym_links;")
+                    cursor.execute(
+                        """
+                        CREATE TABLE sym_links (
+                            target TEXT NOT NULL,
+                            path TEXT NOT NULL
+                        );
+                        """
+                    )
+                    cursor.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_sym_target ON sym_links(target);"
+                    )
+                    cursor.executemany(
+                        "INSERT INTO sym_links (target, path) VALUES (?, ?);",
+                        sym_records,
+                    )
+
+                if "alias" in update_targets:
+                    cursor.execute("DROP TABLE IF EXISTS alias_links;")
+                    cursor.execute(
+                        """
+                        CREATE TABLE alias_links (
+                            target TEXT NOT NULL,
+                            path TEXT NOT NULL
+                        );
+                        """
+                    )
+                    cursor.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_alias_target ON alias_links(target);"
+                    )
+                    cursor.executemany(
+                        "INSERT INTO alias_links (target, path) VALUES (?, ?);",
+                        alias_records,
+                    )
+
+                conn.commit()
+        except sqlite3.Error:
+            # If database file is corrupted or unreadable, safely remove it and recreate from scratch
+            if self.db_path.exists():
                 try:
-                    resolved_target = path.resolve()
-                    sym_map[resolved_target].append(abs_p)
-                except (OSError, FileNotFoundError):
-                    pass
+                    os.unlink(self.db_path)
+                except OSError:
+                    return
+            self._save_to_db(hard_records, sym_records, alias_records, update_targets)
+
+    def index(self, update: UpdateMode = "all", progress: bool = False) -> None:
+        """
+        Scans the directory for the specified link types and overwrites their information in the database.
+        """
+        update_targets = self._parse_update_modes(update)
+        if not update_targets:
+            return
+
+        inode_map: dict[int, list[Path]] = defaultdict(list)
+        sym_map: dict[Path, list[Path]] = defaultdict(list)
+        alias_map: dict[Path, list[Path]] = defaultdict(list)
+        scanned_count = 0
+
+        for path in self.directory.rglob("*"):
+            abs_p = path.resolve()
+            if abs_p == self.db_path:
                 continue
 
-            if (
-                HAS_MACOS_ALIAS
-                and "alias" in update_targets
-                and not path.is_symlink()
-                and path.is_file()
-            ):
-                try:
-                    if is_alias(path):
-                        tgt = target_of(path)
-                        if tgt is not None:
-                            alias_map[Path(tgt).resolve()].append(abs_p)
-                        continue
-                except Exception:
-                    pass
+            scanned_count += 1
+            if progress and (scanned_count % PROGRESS_INTERVAL == 0):
+                sys.stderr.write(f"\rScanning: {scanned_count:,} items processed...")
+                sys.stderr.flush()
 
-            if "hard" in update_targets and path.is_file() and not path.is_symlink():
-                stat_info = path.stat()
-                if stat_info.st_nlink > 1:
-                    inode_map[stat_info.st_ino].append(path.resolve())
+            try:
+                if "sym" in update_targets and path.is_symlink():
+                    try:
+                        resolved_target = path.resolve()
+                        sym_map[resolved_target].append(abs_p)
+                    except (OSError, FileNotFoundError):
+                        pass
+                    continue
 
-        except (OSError, PermissionError):
-            continue
+                if (
+                    HAS_MACOS_ALIAS
+                    and "alias" in update_targets
+                    and not path.is_symlink()
+                    and path.is_file()
+                ):
+                    try:
+                        if is_alias(path):
+                            tgt = target_of(path)
+                            if tgt is not None:
+                                alias_map[Path(tgt).resolve()].append(abs_p)
+                            continue
+                    except Exception:
+                        pass
 
-    if progress:
-        sys.stderr.write(f"\rScanning complete. {scanned_count} items checked.\n")
-        sys.stderr.flush()
+                if (
+                    "hard" in update_targets
+                    and path.is_file()
+                    and not path.is_symlink()
+                ):
+                    stat_info = path.stat()
+                    if stat_info.st_nlink > 1:
+                        inode_map[stat_info.st_ino].append(abs_p)
 
-    scanned_links: list[Link] = []
+            except (OSError, PermissionError):
+                continue
 
-    if "hard" in update_targets:
-        for inode, paths in inode_map.items():
-            unique_paths = tuple(sorted(set(paths)))
-            if len(unique_paths) > 1:
-                scanned_links.append(
-                    Link(link_type="hard", key=inode, paths=unique_paths)
+        if progress:
+            sys.stderr.write(f"\rScanning complete. {scanned_count:,} items checked.\n")
+            sys.stderr.flush()
+
+        hard_records: list[tuple[int, str]] = []
+        sym_records: list[tuple[str, str]] = []
+        alias_records: list[tuple[str, str]] = []
+
+        if "hard" in update_targets:
+            for inode, paths in inode_map.items():
+                unique_paths = tuple(sorted(set(paths)))
+                if len(unique_paths) > 1:
+                    hard_records.extend((inode, str(p)) for p in unique_paths)
+
+        if "sym" in update_targets:
+            for target, paths in sym_map.items():
+                unique_paths = tuple(sorted(set(paths)))
+                if unique_paths:
+                    sym_records.extend((str(target), str(p)) for p in unique_paths)
+
+        if "alias" in update_targets:
+            for target, paths in alias_map.items():
+                unique_paths = tuple(sorted(set(paths)))
+                if unique_paths:
+                    alias_records.extend((str(target), str(p)) for p in unique_paths)
+
+        self._save_to_db(hard_records, sym_records, alias_records, update_targets)
+
+    def find_links(self) -> list[Link]:
+        """
+        Retrieves all link records from the database and returns them as a list of Link objects.
+        Returns an empty list if the database does not exist or is empty.
+        """
+        if not self.db_path.exists():
+            return []
+
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('hard_links', 'sym_links', 'alias_links');"
                 )
+                tables = {row[0] for row in cursor.fetchall()}
 
-    if "sym" in update_targets:
-        for target, paths in sym_map.items():
-            unique_paths = tuple(sorted(set(paths)))
-            if unique_paths:
-                scanned_links.append(
-                    Link(link_type="sym", key=target, paths=unique_paths)
-                )
+                hard_rows = []
+                sym_rows = []
+                alias_rows = []
 
-    if "alias" in update_targets:
-        for target, paths in alias_map.items():
-            unique_paths = tuple(sorted(set(paths)))
-            if unique_paths:
-                scanned_links.append(
-                    Link(link_type="alias", key=target, paths=unique_paths)
-                )
+                if "hard_links" in tables:
+                    cursor.execute(
+                        "SELECT inode, path FROM hard_links ORDER BY inode, path;"
+                    )
+                    hard_rows = cursor.fetchall()
 
-    _save_to_db(resolved_db_path, scanned_links, update_targets)
+                if "sym_links" in tables:
+                    cursor.execute(
+                        "SELECT target, path FROM sym_links ORDER BY target, path;"
+                    )
+                    sym_rows = cursor.fetchall()
 
-    if cached_links is not None:
-        cached_unupdated = [
-            l for l in cached_links if l.link_type not in update_targets
-        ]
-        return scanned_links + cached_unupdated
+                if "alias_links" in tables:
+                    cursor.execute(
+                        "SELECT target, path FROM alias_links ORDER BY target, path;"
+                    )
+                    alias_rows = cursor.fetchall()
 
-    return scanned_links
+            hard_map: dict[int, list[Path]] = defaultdict(list)
+            for inode, path_str in hard_rows:
+                hard_map[inode].append(Path(path_str))
+
+            sym_map: dict[Path, list[Path]] = defaultdict(list)
+            for target_str, path_str in sym_rows:
+                sym_map[Path(target_str)].append(Path(path_str))
+
+            alias_map: dict[Path, list[Path]] = defaultdict(list)
+            for target_str, path_str in alias_rows:
+                alias_map[Path(target_str)].append(Path(path_str))
+
+            links: list[Link] = []
+            for inode, paths in hard_map.items():
+                links.append(Link(link_type="hard", key=inode, paths=tuple(paths)))
+
+            for target, paths in sym_map.items():
+                links.append(Link(link_type="sym", key=target, paths=tuple(paths)))
+
+            for target, paths in alias_map.items():
+                links.append(Link(link_type="alias", key=target, paths=tuple(paths)))
+
+            return links
+        except sqlite3.Error:
+            return []
