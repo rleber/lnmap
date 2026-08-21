@@ -6,7 +6,6 @@ Parses CLI options and handles execution for subcommands:
 """
 
 import argparse
-import datetime
 import json
 import sys
 from pathlib import Path
@@ -63,16 +62,6 @@ def print_links(
                 print(f"{format_path(target_path)} a= {paths_str}")
 
 
-def _format_timestamp(db_path: Path) -> str:
-    """Returns a human-readable string of the last modified time of the DB file."""
-    try:
-        mtime = db_path.stat().st_mtime
-        dt = datetime.datetime.fromtimestamp(mtime)
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
-    except OSError:
-        return "Unknown"
-
-
 def handle_indexes(args: argparse.Namespace) -> None:
     """Handles the 'indexes' subcommand to list parent database index files."""
     try:
@@ -85,22 +74,25 @@ def handle_indexes(args: argparse.Namespace) -> None:
         sys.stdout.write(f"No {DEFAULT_DB_NAME} files found in parent hierarchy.\n")
         return
 
-    for idx_path in found_indexes:
-        ts = _format_timestamp(idx_path)
-        sys.stdout.write(f"{ts}  {idx_path}\n")
+    for idx in found_indexes:
+        local_dt = idx.last_modified.astimezone()
+        ts = local_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+        sys.stdout.write(f"{ts}  {idx.path}\n")
 
 
 def handle_list(args: argparse.Namespace) -> None:
     """Handles the 'list' subcommand."""
     db_path = getattr(args, "db_path", None)
+    if db_path is None:
+        resolved_db = LinkMapper.index_for(args.directory)
+    else:
+        resolved_db = Path(db_path).resolve()
     try:
-        mapper = LinkMapper(directory=args.directory, db_path=db_path)
+        if args.index:
+            LinkMapper.index(resolved_db, progress=not args.quiet)
 
-        # If the user requested an index update before listing
-        if args.index != "none":
-            mapper.index(update=args.index, progress=not args.quiet)
-
-        links = mapper.find_links()
+        mapper = LinkMapper(directory=args.directory, db_path=resolved_db)
+        links = mapper.find_links(include=args.include)
         print_links(links, output_format=args.format)
     except ValueError as e:
         sys.stderr.write(f"Error: {e}\n")
@@ -110,9 +102,11 @@ def handle_list(args: argparse.Namespace) -> None:
 def handle_index(args: argparse.Namespace) -> None:
     """Handles the 'index' subcommand."""
     db_path = getattr(args, "db_path", None)
+    if db_path is None:
+        db_path = Path(args.directory).resolve() / DEFAULT_DB_NAME
+
     try:
-        mapper = LinkMapper(directory=args.directory, db_path=db_path)
-        mapper.index(update="all", progress=not args.quiet)
+        LinkMapper.index(db_path, progress=not args.quiet)
     except ValueError as e:
         sys.stderr.write(f"Error: {e}\n")
         sys.exit(1)
@@ -130,7 +124,7 @@ def main(args: list[str] | None = None) -> None:
         "--db-path",
         type=Path,
         default=None,
-        help=f"Custom path for SQLite database file (default: <directory>/{DEFAULT_DB_NAME})",
+        help=f"Custom path for SQLite database file (default: automatically selected from parent tree or <directory>/{DEFAULT_DB_NAME})",
     )
     parser.add_argument(
         "-v",
@@ -152,13 +146,19 @@ def main(args: list[str] | None = None) -> None:
         "--db-path",
         type=Path,
         default=argparse.SUPPRESS,
-        help=f"Custom path for SQLite database file (default: <directory>/{DEFAULT_DB_NAME})",
+        help="Custom path for SQLite database file (default: automatically select newest parent index)",
+    )
+    list_parser.add_argument(
+        "-I",
+        "--index",
+        action="store_true",
+        help="Update the index database before listing links.",
     )
     list_parser.add_argument(
         "-i",
-        "--index",
-        default="none",
-        help="Specify which link types to update in the SQLite cache: hard, sym, alias, all, none, or comma-separated combinations like 'hard,alias' (default: none if omitted).",
+        "--include",
+        default="all",
+        help="Specify which link types to include in output: hard, sym, alias, all, none, or comma-separated combinations (default: all).",
     )
     list_parser.add_argument(
         "-q",
