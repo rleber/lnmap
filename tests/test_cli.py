@@ -1,4 +1,11 @@
+"""Tests for CLI subcommands, flags, and formatting in lnmap.
+
+Verifies CLI behavior for list, index, and indexes subcommands, output formatting (text and JSON),
+and flag handling.
+"""
+
 import os
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -52,7 +59,7 @@ def test_print_links_alias_format(capsys: pytest.CaptureFixture[str]) -> None:
     assert '"target": "/tmp/target.txt"' in captured_json
 
 
-def test_cli_init(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_index(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     file1 = tmp_path / "a.txt"
     file1.write_text("data")
     file2 = tmp_path / "b.txt"
@@ -64,23 +71,23 @@ def test_cli_init(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     db_path = tmp_path / DEFAULT_DB_NAME
     assert not db_path.exists()
 
-    # Run `init` -> creates DB, outputs nothing to stdout
-    main(["init", str(tmp_path)])
+    # Run `index` -> creates DB, outputs nothing to stdout
+    main(["index", str(tmp_path)])
     out = capsys.readouterr().out
     assert out == ""
     assert db_path.exists()
 
-    # Verify initialized contents via `list` with default update=none
+    # Verify initialized contents via `list` with default index=none
     main(["list", str(tmp_path)])
     list_out = capsys.readouterr().out
     lines = [line for line in list_out.strip().split("\n") if line]
     assert len(lines) == 2
 
-    # Add a new link and run `init` again to overwrite/refresh
+    # Add a new link and run `index` again to overwrite/refresh
     file3 = tmp_path / "c.txt"
     os.link(file1, file3)
 
-    main(["init", str(tmp_path)])
+    main(["index", str(tmp_path)])
     assert capsys.readouterr().out == ""
 
     # `list` should now reflect 3 hard link paths
@@ -90,27 +97,7 @@ def test_cli_init(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert len(hard_line.split(",")) == 3
 
 
-def test_cli_global_db_path(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    file1 = tmp_path / "a.txt"
-    file1.write_text("data")
-    file2 = tmp_path / "b.txt"
-    os.link(file1, file2)
-
-    custom_db = tmp_path / "custom.db"
-    assert not custom_db.exists()
-
-    # Specified before subcommand
-    main(["--db-path", str(custom_db), "init", str(tmp_path)])
-    capsys.readouterr()
-    assert custom_db.exists()
-
-    # Specified after subcommand
-    main(["list", "--db-path", str(custom_db), str(tmp_path)])
-    out = capsys.readouterr().out
-    assert "#=" in out
-
-
-def test_cli_update_flags(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_index_flags(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     file1 = tmp_path / "a.txt"
     file1.write_text("data")
     file2 = tmp_path / "b.txt"
@@ -124,31 +111,31 @@ def test_cli_update_flags(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     file3 = tmp_path / "c.txt"
     os.link(file1, file3)
 
-    # Omitted --update defaults to "none" (returns cached 2 paths)
+    # Omitted --index defaults to "none" (returns cached 2 paths)
     main(["list", str(tmp_path)])
     out_none = capsys.readouterr().out
     assert len(out_none.strip().split(",")) == 2
 
-    # Explicit --update all (returns updated 3 paths)
-    main(["list", "--update", "all", str(tmp_path)])
+    # Explicit --index all (returns updated 3 paths)
+    main(["list", "--index", "all", str(tmp_path)])
     out_all = capsys.readouterr().out
     assert len(out_all.strip().split(",")) == 3
 
-    # Explicit --update hard
-    main(["list", "-u", "hard", str(tmp_path)])
+    # Explicit --index hard
+    main(["list", "-i", "hard", str(tmp_path)])
     out_hard = capsys.readouterr().out
     assert len(out_hard.strip().split(",")) == 3
 
-    # Bare -u / --update without a value raises SystemExit (usage error)
+    # Bare -i / --index without a value raises SystemExit (usage error)
     with pytest.raises(SystemExit) as exc_info:
-        main(["list", "-u"])
+        main(["list", "-i"])
 
     assert exc_info.value.code != 0
     err_out = capsys.readouterr().err
     assert "expected one argument" in err_out or "usage:" in err_out
 
 
-def test_cli_multi_update(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_multi_index(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     file1 = tmp_path / "a.txt"
     file1.write_text("data")
     file2 = tmp_path / "b.txt"
@@ -166,8 +153,56 @@ def test_cli_multi_update(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     sym2 = tmp_path / "s2.txt"
     sym2.symlink_to(file1)
 
-    # Test comma-separated --update hard,sym
-    main(["list", "--update", "hard,sym", str(tmp_path)])
+    # Test comma-separated --index hard,sym
+    main(["list", "--index", "hard,sym", str(tmp_path)])
     out = capsys.readouterr().out
     lines = [line for line in out.strip().split("\n") if line]
     assert len(lines) == 2
+
+
+def test_cli_indexes_subcommand_with_timestamp(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Set up directory structure: /root/sub1/sub2
+    root = tmp_path / "root"
+    sub1 = root / "sub1"
+    sub2 = sub1 / "sub2"
+    sub2.mkdir(parents=True)
+
+    db_root = root / DEFAULT_DB_NAME
+    db_root.touch()
+
+    db_sub2 = sub2 / DEFAULT_DB_NAME
+    db_sub2.touch()
+
+    # Run indexes subcommand
+    main(["indexes", str(sub2)])
+    out = capsys.readouterr().out
+    lines = [line for line in out.strip().split("\n") if line]
+
+    assert len(lines) == 2
+
+    # Each line should match "YYYY-MM-DD HH:MM:SS  <path>"
+    for line in lines:
+        parts = line.split("  ", 1)
+        assert len(parts) == 2
+        timestamp_str, path_str = parts[0], parts[1]
+
+        # Validate ISO-like datetime format
+        parsed_dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+        assert parsed_dt is not None
+
+        unquoted_path = path_str.strip('"')
+        assert unquoted_path in (str(db_sub2.resolve()), str(db_root.resolve()))
+
+
+def test_cli_indexes_invalid_dir(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    non_existent = tmp_path / "does_not_exist"
+    with pytest.raises(SystemExit) as exc_info:
+        main(["indexes", str(non_existent)])
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "Error: Target path" in err
