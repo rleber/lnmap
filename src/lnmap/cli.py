@@ -98,7 +98,7 @@ def handle_list(args: argparse.Namespace) -> None:
 
         # If the user requested an index update before listing
         if args.index != "none":
-            mapper.index(update=args.index, progress=args.progress)
+            mapper.index(update=args.index, progress=not args.quiet)
 
         links = mapper.find_links()
         print_links(links, output_format=args.format)
@@ -161,10 +161,10 @@ def main(args: list[str] | None = None) -> None:
         help="Specify which link types to update in the SQLite cache: hard, sym, alias, all, none, or comma-separated combinations like 'hard,alias' (default: none if omitted).",
     )
     list_parser.add_argument(
-        "-p",
-        "--progress",
+        "-q",
+        "--quiet",
         action="store_true",
-        help="Display scanning progress indicator on stderr.",
+        help="Suppress scanning progress indicator on stderr when indexing.",
     )
     list_parser.add_argument(
         "-f",

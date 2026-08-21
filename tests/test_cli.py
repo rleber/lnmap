@@ -100,6 +100,25 @@ def test_cli_index(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert len(hard_line.split(",")) == 3
 
 
+def test_cli_list_quiet_flag(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file1 = tmp_path / "a.txt"
+    file1.write_text("data")
+    file2 = tmp_path / "b.txt"
+    os.link(file1, file2)
+
+    # `list` with `--index all` outputs progress by default
+    main(["list", "--index", "all", str(tmp_path)])
+    captured = capsys.readouterr()
+    assert "Scanning complete." in captured.err
+
+    # `list` with `--index all -q` suppresses progress
+    main(["list", "--index", "all", "-q", str(tmp_path)])
+    captured_quiet = capsys.readouterr()
+    assert "Scanning complete." not in captured_quiet.err
+
+
 def test_cli_index_flags(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     file1 = tmp_path / "a.txt"
     file1.write_text("data")
@@ -120,12 +139,12 @@ def test_cli_index_flags(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> 
     assert len(out_none.strip().split(",")) == 2
 
     # Explicit --index all (updates DB, returns updated 3 paths)
-    main(["list", "--index", "all", str(tmp_path)])
+    main(["list", "--index", "all", "-q", str(tmp_path)])
     out_all = capsys.readouterr().out
     assert len(out_all.strip().split(",")) == 3
 
     # Explicit --index hard
-    main(["list", "-i", "hard", str(tmp_path)])
+    main(["list", "-i", "hard", "-q", str(tmp_path)])
     out_hard = capsys.readouterr().out
     assert len(out_hard.strip().split(",")) == 3
 
@@ -158,7 +177,7 @@ def test_cli_multi_index(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> 
     sym2.symlink_to(file1)
 
     # Test comma-separated --index hard,sym updates and shows both
-    main(["list", "--index", "hard,sym", str(tmp_path)])
+    main(["list", "--index", "hard,sym", "-q", str(tmp_path)])
     out = capsys.readouterr().out
     lines = [line for line in out.strip().split("\n") if line]
     assert len(lines) == 2
