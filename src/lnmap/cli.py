@@ -75,24 +75,11 @@ def _format_timestamp(db_path: Path) -> str:
 
 def handle_indexes(args: argparse.Namespace) -> None:
     """Handles the 'indexes' subcommand to list parent database index files."""
-    target_dir = Path(args.directory).resolve()
-    if not target_dir.is_dir():
-        sys.stderr.write(
-            f"Error: Target path '{args.directory}' is not a valid directory.\n"
-        )
+    try:
+        found_indexes = LinkMapper.indexes(args.directory)
+    except ValueError as e:
+        sys.stderr.write(f"Error: {e}\n")
         sys.exit(1)
-
-    current = target_dir
-    found_indexes: list[Path] = []
-
-    while True:
-        candidate = current / DEFAULT_DB_NAME
-        if candidate.is_file():
-            found_indexes.append(candidate)
-
-        if current.parent == current:
-            break
-        current = current.parent
 
     if not found_indexes:
         sys.stdout.write(f"No {DEFAULT_DB_NAME} files found in parent hierarchy.\n")
@@ -108,7 +95,12 @@ def handle_list(args: argparse.Namespace) -> None:
     db_path = getattr(args, "db_path", None)
     try:
         mapper = LinkMapper(directory=args.directory, db_path=db_path)
-        links = mapper.find_links(update=args.index, progress=args.progress)
+
+        # If the user requested an index update before listing
+        if args.index != "none":
+            mapper.index(update=args.index, progress=args.progress)
+
+        links = mapper.find_links()
         print_links(links, output_format=args.format)
     except ValueError as e:
         sys.stderr.write(f"Error: {e}\n")
@@ -120,7 +112,7 @@ def handle_index(args: argparse.Namespace) -> None:
     db_path = getattr(args, "db_path", None)
     try:
         mapper = LinkMapper(directory=args.directory, db_path=db_path)
-        mapper.find_links(update="all", progress=args.progress)
+        mapper.index(update="all", progress=not args.quiet)
     except ValueError as e:
         sys.stderr.write(f"Error: {e}\n")
         sys.exit(1)
@@ -202,10 +194,10 @@ def main(args: list[str] | None = None) -> None:
         help=f"Custom path for SQLite database file (default: <directory>/{DEFAULT_DB_NAME})",
     )
     index_parser.add_argument(
-        "-p",
-        "--progress",
+        "-q",
+        "--quiet",
         action="store_true",
-        help="Display scanning progress indicator on stderr.",
+        help="Suppress scanning progress indicator on stderr.",
     )
     index_parser.add_argument(
         "directory",

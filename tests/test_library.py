@@ -22,6 +22,27 @@ def test_invalid_directory() -> None:
     with pytest.raises(ValueError, match="not a valid directory"):
         LinkMapper(directory="/path/that/does/not/exist/at/all")
 
+    with pytest.raises(ValueError, match="not a valid directory"):
+        LinkMapper.indexes(directory="/path/that/does/not/exist/at/all")
+
+
+def test_linkmapper_indexes_classmethod(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    sub1 = root / "sub1"
+    sub2 = sub1 / "sub2"
+    sub2.mkdir(parents=True)
+
+    db_root = root / DEFAULT_DB_NAME
+    db_root.touch()
+
+    db_sub2 = sub2 / DEFAULT_DB_NAME
+    db_sub2.touch()
+
+    found = LinkMapper.indexes(sub2)
+    assert len(found) == 2
+    assert db_sub2.resolve() in found
+    assert db_root.resolve() in found
+
 
 def test_hard_link_detection(tmp_path: Path) -> None:
     file1 = tmp_path / "file1.txt"
@@ -35,7 +56,8 @@ def test_hard_link_detection(tmp_path: Path) -> None:
     file3.write_text("single file")
 
     mapper = LinkMapper(tmp_path)
-    links = mapper.find_links(update="all")
+    mapper.index(update="all")
+    links = mapper.find_links()
 
     hard_links = [l for l in links if l.link_type == "hard"]
     assert len(hard_links) == 1
@@ -54,7 +76,8 @@ def test_symlink_detection(tmp_path: Path) -> None:
     sym2.symlink_to(target)
 
     mapper = LinkMapper(tmp_path)
-    links = mapper.find_links(update="all")
+    mapper.index(update="all")
+    links = mapper.find_links()
 
     sym_links = [l for l in links if l.link_type == "sym"]
     assert len(sym_links) == 1
@@ -79,7 +102,8 @@ def test_db_caching_and_partial_update(tmp_path: Path) -> None:
     mapper = LinkMapper(tmp_path)
 
     # Initial run creates database
-    links1 = mapper.find_links(update="all")
+    mapper.index(update="all")
+    links1 = mapper.find_links()
     assert len(links1) == 2
     assert db_file.exists()
 
@@ -90,15 +114,17 @@ def test_db_caching_and_partial_update(tmp_path: Path) -> None:
     sym2 = tmp_path / "sym2.txt"
     sym2.symlink_to(target)
 
-    # Run with update="none" -> should return cached results
-    links_cached = mapper.find_links(update="none")
+    # Run with update="none" -> should return cached results without updating DB
+    mapper.index(update="none")
+    links_cached = mapper.find_links()
     hard_cached = next(l for l in links_cached if l.link_type == "hard")
     sym_cached = next(l for l in links_cached if l.link_type == "sym")
     assert len(hard_cached.paths) == 2
     assert len(sym_cached.paths) == 1
 
     # Run with update="hard" -> should refresh hard links but keep cached symlinks
-    links_partial = mapper.find_links(update="hard")
+    mapper.index(update="hard")
+    links_partial = mapper.find_links()
     hard_partial = next(l for l in links_partial if l.link_type == "hard")
     sym_partial = next(l for l in links_partial if l.link_type == "sym")
     assert len(hard_partial.paths) == 3
@@ -117,7 +143,8 @@ def test_custom_db_path(tmp_path: Path) -> None:
     mapper = LinkMapper(directory=tmp_path, db_path=custom_db)
     assert mapper.db_path == custom_db.resolve()
 
-    links = mapper.find_links(update="all")
+    mapper.index(update="all")
+    links = mapper.find_links()
 
     assert custom_db.exists()
     assert not (tmp_path / DEFAULT_DB_NAME).exists()
@@ -131,7 +158,7 @@ def test_progress_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> 
     os.link(file1, file2)
 
     mapper = LinkMapper(tmp_path)
-    mapper.find_links(update="all", progress=True)
+    mapper.index(update="all", progress=True)
 
     captured = capsys.readouterr()
     assert "Scanning complete." in captured.err
@@ -146,7 +173,8 @@ def test_corrupted_db_fallback(tmp_path: Path) -> None:
     file2 = tmp_path / "file2.txt"
     os.link(file1, file2)
 
-    # Should safely handle DB connection error and rescan
     mapper = LinkMapper(tmp_path)
-    links = mapper.find_links(update="none")
+    mapper.index(update="all")
+    links = mapper.find_links()
+
     assert len(links) == 1

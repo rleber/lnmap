@@ -71,10 +71,11 @@ def test_cli_index(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     db_path = tmp_path / DEFAULT_DB_NAME
     assert not db_path.exists()
 
-    # Run `index` -> creates DB, outputs nothing to stdout
+    # Run `index` -> creates DB, outputs progress to stderr by default
     main(["index", str(tmp_path)])
-    out = capsys.readouterr().out
-    assert out == ""
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Scanning complete." in captured.err
     assert db_path.exists()
 
     # Verify initialized contents via `list` with default index=none
@@ -83,12 +84,14 @@ def test_cli_index(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     lines = [line for line in list_out.strip().split("\n") if line]
     assert len(lines) == 2
 
-    # Add a new link and run `index` again to overwrite/refresh
+    # Add a new link and run `index` with `-q` / `--quiet` to suppress progress
     file3 = tmp_path / "c.txt"
     os.link(file1, file3)
 
-    main(["index", str(tmp_path)])
-    assert capsys.readouterr().out == ""
+    main(["index", "-q", str(tmp_path)])
+    captured_quiet = capsys.readouterr()
+    assert captured_quiet.out == ""
+    assert "Scanning complete." not in captured_quiet.err
 
     # `list` should now reflect 3 hard link paths
     main(["list", str(tmp_path)])
@@ -103,20 +106,20 @@ def test_cli_index_flags(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> 
     file2 = tmp_path / "b.txt"
     os.link(file1, file2)
 
-    # Initial run creates DB and scans all
-    main(["list", str(tmp_path)])
+    # Initial run creates DB and scans all using index
+    main(["index", str(tmp_path)])
     capsys.readouterr()
 
     # Add new link
     file3 = tmp_path / "c.txt"
     os.link(file1, file3)
 
-    # Omitted --index defaults to "none" (returns cached 2 paths)
+    # Omitted --index defaults to "none" (returns cached 2 paths from initial index)
     main(["list", str(tmp_path)])
     out_none = capsys.readouterr().out
     assert len(out_none.strip().split(",")) == 2
 
-    # Explicit --index all (returns updated 3 paths)
+    # Explicit --index all (updates DB, returns updated 3 paths)
     main(["list", "--index", "all", str(tmp_path)])
     out_all = capsys.readouterr().out
     assert len(out_all.strip().split(",")) == 3
@@ -144,7 +147,8 @@ def test_cli_multi_index(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> 
     sym1 = tmp_path / "s1.txt"
     sym1.symlink_to(file1)
 
-    main(["list", str(tmp_path)])
+    # Create the initial database using index
+    main(["index", str(tmp_path)])
     capsys.readouterr()
 
     file3 = tmp_path / "c.txt"
@@ -153,7 +157,7 @@ def test_cli_multi_index(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> 
     sym2 = tmp_path / "s2.txt"
     sym2.symlink_to(file1)
 
-    # Test comma-separated --index hard,sym
+    # Test comma-separated --index hard,sym updates and shows both
     main(["list", "--index", "hard,sym", str(tmp_path)])
     out = capsys.readouterr().out
     lines = [line for line in out.strip().split("\n") if line]
