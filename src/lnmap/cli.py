@@ -1,4 +1,7 @@
-"""lnmap - Command Line Interface refactored with Typer."""
+"""lnmap - Command Line Interface
+
+Catalog hard links, symlinks and aliases in a directory
+"""
 
 import json
 from enum import Enum
