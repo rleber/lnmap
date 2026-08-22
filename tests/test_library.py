@@ -66,4 +66,4 @@ def test_symlink_indexing(root_dir: Path) -> None:
 
     assert len(links) == 1
     assert links[0].link_type == "sym"
-    assert links[0].paths[0] == sym.resolve()
+    assert links[0].paths[0] == sym

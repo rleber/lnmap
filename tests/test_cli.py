@@ -35,7 +35,7 @@ def test_cli_index_and_list_text(tmp_path: Path) -> None:
 
     list_result = runner.invoke(app, ["list", str(tmp_path)])
     assert list_result.exit_code == 0
-    assert "[HARD]" in list_result.stdout
+    assert "[hard]" in list_result.stdout
 
 
 def test_cli_list_json_format(tmp_path: Path) -> None:
@@ -110,4 +110,4 @@ def test_cli_multi_index(tmp_path: Path) -> None:
 
     list_result = runner.invoke(app, ["list", str(tmp_path)])
     assert list_result.exit_code == 0
-    assert "[HARD]" in list_result.stdout
+    assert "[hard]" in list_result.stdout

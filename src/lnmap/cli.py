@@ -184,9 +184,9 @@ def list_links(
             print(f"Found {len(links)} link set(s):")
 
         for link in links:
-            print(f"[{link.link_type.upper()}] Key/Target: {link.key}")
+            print(f"[{link.link_type}] Key/Target: {link.key}")
             for p in link.paths:
-                print(f"  -> {p}")
+                print(f"  <- {p}")
 
 
 @app.command()
