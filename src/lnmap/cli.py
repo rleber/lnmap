@@ -34,24 +34,21 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+VALID_TYPES = {"all", "alias", "hard", "sym"}
+
+
 def parse_link_types(types: str) -> set[str]:
     """Parse comma-separated link type argument into a normalized set."""
-    valid_types = {"hard", "sym", "alias"}
-    valid_choices = valid_types | {"all", "none"}
 
-    raw_types = [item.strip() for item in types.split(",") if item.strip()]
-    targets: set[str] = set()
-    for item in raw_types:
-        if item not in valid_choices:
-            raise typer.BadParameter(
-                f"Invalid option '{item}'. Must be one or more of: hard, sym, alias, all, none."
-            )
-        if item == "all":
-            return {"hard", "sym", "alias"}
-        if item != "none":
-            targets.add(item)
+    types = [item.strip() for item in types.split(",") if item.strip()]
+    if bad_type := next((type for type in types if type not in VALID_TYPES), None):
+        raise typer.BadParameter(
+            f"Invalid type '{bad_type}'. Must be {', '.join(VALID_TYPES)}."
+        )
 
-    return targets
+    if "all" in types:
+        return VALID_TYPES - {"all"}
+    return set(types)
 
 
 def loud_logger(count: int) -> None:
@@ -141,7 +138,7 @@ def list_links(
         Option(
             "-q",
             "--quiet",
-            help="Suppress human-readable summary header.",
+            help="Quiet mode.",
         ),
     ] = False,
     output_format: Annotated[
@@ -156,7 +153,8 @@ def list_links(
     """Query indexed links."""
     if force_index:
         db_path = LinkMapper.index_for(directory)
-        LinkMapper.index(db_path)
+        logger = quiet_logger if quiet else loud_logger
+        LinkMapper.index(db_path, logger)
 
     mapper = LinkMapper(directory)
     include = parse_link_types(link_type)
