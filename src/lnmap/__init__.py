@@ -308,55 +308,51 @@ class LinkMapper:
         )
         like_pattern = f"{escaped_prefix}%"
 
-        # TODO refactor using with
-        try:
-            conn = sqlite3.connect(self.db_path)
-            try:
-                cursor = conn.cursor()
+        with (
+            sqlite3.connect(self.db_path) as conn,
+            contextlib.closing(conn.cursor()) as cursor,
+        ):
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('hard_links', 'sym_links', 'alias_links');"
+            )
+            tables = {row[0] for row in cursor.fetchall()}
+
+            hard_rows = []
+            sym_rows = []
+            alias_rows = []
+
+            if "hard" in include and "hard_links" in tables:
                 cursor.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('hard_links', 'sym_links', 'alias_links');"
+                    """
+                    SELECT inode, path FROM hard_links
+                    WHERE path LIKE ? ESCAPE '\\'
+                    ORDER BY inode, path;
+                    """,
+                    (like_pattern,),
                 )
-                tables = {row[0] for row in cursor.fetchall()}
+                hard_rows = cursor.fetchall()
 
-                hard_rows = []
-                sym_rows = []
-                alias_rows = []
+            if "sym" in include and "sym_links" in tables:
+                cursor.execute(
+                    """
+                    SELECT target, path FROM sym_links
+                    WHERE path LIKE ? ESCAPE '\\'
+                    ORDER BY target, path;
+                    """,
+                    (like_pattern,),
+                )
+                sym_rows = cursor.fetchall()
 
-                if "hard" in include and "hard_links" in tables:
-                    cursor.execute(
-                        """
-                        SELECT inode, path FROM hard_links
-                        WHERE path LIKE ? ESCAPE '\\'
-                        ORDER BY inode, path;
-                        """,
-                        (like_pattern,),
-                    )
-                    hard_rows = cursor.fetchall()
-
-                if "sym" in include and "sym_links" in tables:
-                    cursor.execute(
-                        """
-                        SELECT target, path FROM sym_links
-                        WHERE path LIKE ? ESCAPE '\\'
-                        ORDER BY target, path;
-                        """,
-                        (like_pattern,),
-                    )
-                    sym_rows = cursor.fetchall()
-
-                if "alias" in include and "alias_links" in tables:
-                    cursor.execute(
-                        """
-                        SELECT target, path FROM alias_links
-                        WHERE path LIKE ? ESCAPE '\\'
-                        ORDER BY target, path;
-                        """,
-                        (like_pattern,),
-                    )
-                    alias_rows = cursor.fetchall()
-
-            finally:
-                conn.close()
+            if "alias" in include and "alias_links" in tables:
+                cursor.execute(
+                    """
+                    SELECT target, path FROM alias_links
+                    WHERE path LIKE ? ESCAPE '\\'
+                    ORDER BY target, path;
+                    """,
+                    (like_pattern,),
+                )
+                alias_rows = cursor.fetchall()
 
             links: list[Link] = []
 
@@ -389,5 +385,3 @@ class LinkMapper:
                     )
 
             return links
-        except sqlite3.Error:
-            return []
