@@ -65,8 +65,8 @@ class LinkMapper:
 
     def __init__(
         self,
-        directory: str | Path,
-        db_path: str | Path | None = None,
+        directory: Path,
+        db_path: Path | None = None,
     ) -> None:
         self.directory = Path(directory).resolve()
         if not self.directory.is_dir():
@@ -78,30 +78,29 @@ class LinkMapper:
             self.db_path = self.index_for(self.directory)
 
     @staticmethod
-    def db_for(directory: str | Path) -> Path:
+    def db_for(directory: Path) -> Path:
         """Returns the name of the index database corresponding to a directory"""
         return Path(directory) / DEFAULT_DB_NAME
 
-    # TODO remove str | Path throughout
     @staticmethod
-    def index_for(directory: str | Path) -> Path:
+    def index_for(directory: Path) -> Path:
         """Finds the best existing index database using parent traversal, or defaults to <directory>/.lnmap_index.db."""
-        target_dir = Path(directory).resolve()
-        found_indexes = LinkMapper.indexes(target_dir)
+        directory = directory.resolve()
+        found_indexes = LinkMapper.indexes(directory)
 
         if found_indexes:
             best_index = max(found_indexes, key=lambda idx: idx.last_modified)
             return best_index.path
 
-        return LinkMapper.db_for(target_dir)
+        return LinkMapper.db_for(directory)
 
     @classmethod
-    def indexes(cls, directory: str | Path) -> list[LinkIndex]:
+    def indexes(cls, directory: Path) -> list[LinkIndex]:
         """
         Searches for index database files starting from the specified directory
         and traversing up through parent directories, returning a list of LinkIndex objects with last_modified in UTC.
         """
-        target_dir = Path(directory).resolve()
+        target_dir = directory.resolve()
         if not target_dir.is_dir():
             raise ValueError(f"Target path '{directory}' is not a valid directory.")
 
@@ -128,17 +127,16 @@ class LinkMapper:
 
     @staticmethod
     def _save_to_db(
-        db_path: str | Path,
+        db: Path,
         hard_records: list[tuple[int, str]],
         sym_records: list[tuple[str, str]],
         alias_records: list[tuple[str, str]],
     ) -> None:
         """Updates the specified database file with all provided link records."""
-        target_db = Path(db_path)
-        if target_db.exists():
-            target_db.unlink()
+        if db.exists():
+            db.unlink()
         with (
-            sqlite3.connect(target_db) as conn,
+            sqlite3.connect(db) as conn,
             contextlib.closing(conn.cursor()) as cursor,
         ):
             cursor.execute("PRAGMA journal_mode = MEMORY;")
@@ -206,12 +204,12 @@ class LinkMapper:
 
     # TODO The progress indicator has a bit of a smell. Should it be passed in from cli
     @staticmethod
-    def index(scan_directory: str | Path, quiet: bool = False) -> None:
+    def index(scan_directory: Path, quiet: bool = False) -> None:
         """
         Scans the directory containing the given database file for all link types
         and overwrites their information in the database.
         """
-        scan_directory = Path(scan_directory).resolve()
+        scan_directory = scan_directory.resolve()
         resolved_db_path = LinkMapper.db_for(scan_directory)
 
         inode_map: dict[int, list[Path]] = defaultdict(list)
