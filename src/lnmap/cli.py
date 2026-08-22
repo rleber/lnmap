@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+import yaml
 from typer import Argument, Option
 
 from . import LinkMapper, __version__
@@ -25,6 +26,7 @@ PROGRESS_INTERVAL = 1000
 class OutputFormat(str, Enum):
     TEXT = "text"
     JSON = "json"
+    YAML = "yaml"
 
 
 def version_callback(value: bool) -> None:
@@ -124,8 +126,8 @@ def list_links(
         list[ValidTypes] | None,
         Option(
             ...,
-            "--fruit",
-            "-f",
+            "--type",
+            "-t",
             help="Select choices, or 'all' to select everything.",
         ),
     ] = None,
@@ -174,7 +176,18 @@ def list_links(
             for link in links
         ]
         print(json.dumps(json_data, indent=2))
-    else:
+    elif output_format == OutputFormat.YAML:
+        yaml_data = [
+            {
+                "type": link.link_type,
+                "key": str(link.key),
+                "paths": [str(p) for p in link.paths],
+            }
+            for link in links
+        ]
+        # sort_keys=False preserves dict order; default_flow_style=False enforces block structure
+        print(yaml.dump(yaml_data, sort_keys=False, default_flow_style=False))
+    else:  # Text
         if not links:
             if not quiet:
                 print("No links found.")
