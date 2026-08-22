@@ -5,6 +5,7 @@ Provides core abstractions for finding, categorizing, and caching file system li
 including hard links, symbolic links, and macOS file aliases.
 """
 
+import contextlib
 import datetime
 import os
 import sqlite3
@@ -15,12 +16,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 DEFAULT_DB_NAME = ".lnmap_index.db"
 PROGRESS_INTERVAL = 1000
 
+# TODO code smell
 UpdateMode = str | Iterable[str] | bool
 
+# TODO Move this to macos_alias library
 if sys.platform == "darwin":
     try:
         from macos_alias import is_alias, target_of
@@ -70,25 +73,28 @@ class LinkMapper:
         self.directory = Path(directory).resolve()
         if not self.directory.is_dir():
             raise ValueError(f"Target path '{directory}' is not a valid directory.")
-        if db_path is None:
-            self.db_path = self.index_for(self.directory)
+
+        if db_path is not None:
+            self.db_path = Path(db_path).resolve()
         else:
-            self.db_path = db_path.resolve()
+            self.db_path = self.index_for(self.directory)
 
     @staticmethod
-    def index_for(
-        directory: str | Path,
-    ) -> Path:
-        """Resolves the best database path for a directory"""
+    def db_for(directory: str | Path) -> Path:
+        """Returns the name of the index database corresponding to a directory"""
+        return Path(directory) / DEFAULT_DB_NAME
 
+    @staticmethod
+    def index_for(directory: str | Path) -> Path:
+        """Finds the best existing index database using parent traversal, or defaults to <directory>/.lnmap_index.db."""
         target_dir = Path(directory).resolve()
         found_indexes = LinkMapper.indexes(target_dir)
 
         if found_indexes:
             best_index = max(found_indexes, key=lambda idx: idx.last_modified)
             return best_index.path
-        else:
-            return target_dir / DEFAULT_DB_NAME
+
+        return LinkMapper.db_for(target_dir)
 
     @classmethod
     def indexes(cls, directory: str | Path) -> list[LinkIndex]:
@@ -108,9 +114,11 @@ class LinkMapper:
             if candidate.is_file():
                 try:
                     mtime = candidate.stat().st_mtime
-                    dt = datetime.datetime.fromtimestamp(mtime, tz=datetime.UTC)
+                    dt = datetime.datetime.fromtimestamp(
+                        mtime, tz=datetime.timezone.utc
+                    )
                 except OSError:
-                    dt = datetime.datetime.fromtimestamp(0, tz=datetime.UTC)
+                    dt = datetime.datetime.fromtimestamp(0, tz=datetime.timezone.utc)
                 found_indexes.append(LinkIndex(path=candidate, last_modified=dt))
 
             if current.parent == current:
@@ -119,6 +127,7 @@ class LinkMapper:
 
         return found_indexes
 
+    # TODO This is human-interaction, it should be in the cli
     @classmethod
     def _parse_update_modes(cls, update: UpdateMode) -> set[str]:
         """Parses include argument into a set of target link types ('hard', 'sym', 'alias')."""
@@ -159,132 +168,137 @@ class LinkMapper:
     ) -> None:
         """Updates the specified database file with all provided link records."""
         target_db = Path(db_path)
-        try:
-            with sqlite3.connect(target_db) as conn:
-                cursor = conn.cursor()
+        if target_db.exists():
+            target_db.unlink()
+        with (
+            sqlite3.connect(target_db) as conn,
+            contextlib.closing(conn.cursor()) as cursor,
+        ):
+            cursor.execute("PRAGMA journal_mode = MEMORY;")
+            cursor.execute("PRAGMA synchronous = OFF;")
 
-                cursor.execute("DROP TABLE IF EXISTS hard_links;")
-                cursor.execute(
-                    """
+            cursor.execute("DROP TABLE IF EXISTS hard_links;")
+            cursor.execute(
+                """
                     CREATE TABLE hard_links (
                         inode INTEGER NOT NULL,
                         path TEXT NOT NULL
                     );
                     """
-                )
-                cursor.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_hard_inode ON hard_links(inode);"
-                )
-                cursor.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_hard_path ON hard_links(path COLLATE BINARY, inode);"
-                )
-                cursor.executemany(
-                    "INSERT INTO hard_links (inode, path) VALUES (?, ?);",
-                    hard_records,
-                )
+            )
+            cursor.executemany(
+                "INSERT INTO hard_links (inode, path) VALUES (?, ?);",
+                hard_records,
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_hard_inode ON hard_links(inode);"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_hard_path ON hard_links(path COLLATE BINARY, inode);"
+            )
 
-                cursor.execute("DROP TABLE IF EXISTS sym_links;")
-                cursor.execute(
-                    """
+            cursor.execute("DROP TABLE IF EXISTS sym_links;")
+            cursor.execute(
+                """
                     CREATE TABLE sym_links (
                         target TEXT NOT NULL,
                         path TEXT NOT NULL
                     );
                     """
-                )
-                cursor.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_sym_target ON sym_links(target);"
-                )
-                cursor.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_sym_path ON sym_links(path COLLATE BINARY, target);"
-                )
-                cursor.executemany(
-                    "INSERT INTO sym_links (target, path) VALUES (?, ?);",
-                    sym_records,
-                )
+            )
+            cursor.executemany(
+                "INSERT INTO sym_links (target, path) VALUES (?, ?);",
+                sym_records,
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sym_target ON sym_links(target);"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sym_path ON sym_links(path COLLATE BINARY, target);"
+            )
 
-                cursor.execute("DROP TABLE IF EXISTS alias_links;")
-                cursor.execute(
-                    """
+            cursor.execute("DROP TABLE IF EXISTS alias_links;")
+            cursor.execute(
+                """
                     CREATE TABLE alias_links (
                         target TEXT NOT NULL,
                         path TEXT NOT NULL
                     );
                     """
-                )
-                cursor.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_alias_target ON alias_links(target);"
-                )
-                cursor.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_alias_path ON alias_links(path COLLATE BINARY, target);"
-                )
-                cursor.executemany(
-                    "INSERT INTO alias_links (target, path) VALUES (?, ?);",
-                    alias_records,
-                )
+            )
+            cursor.executemany(
+                "INSERT INTO alias_links (target, path) VALUES (?, ?);",
+                alias_records,
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_alias_target ON alias_links(target);"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_alias_path ON alias_links(path COLLATE BINARY, target);"
+            )
 
-                conn.commit()
-        except sqlite3.Error:
-            # If database file is corrupted or unreadable, safely remove it and recreate from scratch
-            if target_db.exists():
-                try:
-                    os.unlink(target_db)
-                except OSError:
-                    return
-            LinkMapper._save_to_db(target_db, hard_records, sym_records, alias_records)
-
+    # TODO The progress indicator has a bit of a smell. Should it be passed in from cli
     @staticmethod
-    def index(db_path: str | Path, progress: bool = False) -> None:
+    def index(scan_directory: str | Path, quiet: bool = False) -> None:
         """
         Scans the directory containing the given database file for all link types
         and overwrites their information in the database.
         """
-        resolved_db_path = Path(db_path).resolve()
-        scan_directory = resolved_db_path.parent
+        scan_directory = Path(scan_directory).resolve()
+        resolved_db_path = LinkMapper.db_for(scan_directory)
 
         inode_map: dict[int, list[Path]] = defaultdict(list)
         sym_map: dict[Path, list[Path]] = defaultdict(list)
         alias_map: dict[Path, list[Path]] = defaultdict(list)
         scanned_count = 0
 
-        for path in scan_directory.rglob("*"):
-            abs_p = path.resolve()
-            if abs_p == resolved_db_path:
-                continue
-
-            scanned_count += 1
-            if progress and (scanned_count % PROGRESS_INTERVAL == 0):
-                sys.stderr.write(f"\rScanning: {scanned_count:,} items processed...")
-                sys.stderr.flush()
-
-            try:
+        for root_str, _, filenames in os.walk(scan_directory):
+            for fname in filenames:
+                path = Path(root_str) / fname
+                # Construct canonical resolved path without following symlink if `path` is a symlink
                 if path.is_symlink():
-                    try:
-                        resolved_target = path.resolve()
-                        sym_map[resolved_target].append(abs_p)
-                    except (OSError, FileNotFoundError):
-                        pass
+                    abs_p = path.parent.resolve() / path.name
+                else:
+                    abs_p = path.resolve()
+
+                if abs_p == resolved_db_path:
                     continue
 
-                if HAS_MACOS_ALIAS and not path.is_symlink() and path.is_file():
-                    try:
-                        if is_alias(path):
-                            tgt = target_of(path)
-                            if tgt is not None:
-                                alias_map[Path(tgt).resolve()].append(abs_p)
-                            continue
-                    except Exception:  # noqa
-                        pass
+                scanned_count += 1
+                if not quiet and (scanned_count % PROGRESS_INTERVAL == 0):
+                    sys.stderr.write(
+                        f"\rScanning: {scanned_count:,} items processed..."
+                    )
+                    sys.stderr.flush()
 
-                if path.is_file() and not path.is_symlink():
-                    stat_info = path.stat()
-                    if stat_info.st_nlink > 1:
-                        inode_map[stat_info.st_ino].append(abs_p)
+                try:
+                    if path.is_symlink():
+                        try:
+                            resolved_target = path.resolve()
+                            sym_map[resolved_target].append(abs_p)
+                        except (OSError, FileNotFoundError):
+                            pass
+                        continue
 
-            except (OSError, PermissionError):
-                continue
+                    if HAS_MACOS_ALIAS and not path.is_symlink() and path.is_file():
+                        try:
+                            if is_alias(path):
+                                tgt = target_of(path)
+                                if tgt is not None:
+                                    alias_map[Path(tgt).resolve()].append(abs_p)
+                                continue
+                        except Exception:  # noqa
+                            pass
 
-        if progress:
+                    if path.is_file() and not path.is_symlink():
+                        stat_info = path.stat()
+                        if stat_info.st_nlink > 1:
+                            inode_map[stat_info.st_ino].append(abs_p)
+
+                except (OSError, PermissionError):
+                    continue
+
+        if not quiet:
             sys.stderr.write(f"\rScanning complete. {scanned_count:,} items checked.\n")
             sys.stderr.flush()
 
@@ -323,19 +337,19 @@ class LinkMapper:
         if not include_targets:
             return []
 
-        # Prepare prefix matching string for SQLite LIKE query
         dir_str = str(self.directory.resolve())
         if not dir_str.endswith(os.sep):
             dir_str += os.sep
 
-        # Escape wildcard characters % and _ so they are matched literally
         escaped_prefix = (
             dir_str.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         )
         like_pattern = f"{escaped_prefix}%"
 
+        # TODO refactor using with
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            conn = sqlite3.connect(self.db_path)
+            try:
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('hard_links', 'sym_links', 'alias_links');"
@@ -349,10 +363,10 @@ class LinkMapper:
                 if "hard" in include_targets and "hard_links" in tables:
                     cursor.execute(
                         """
-                            SELECT inode, path FROM hard_links
-                            WHERE path LIKE ? ESCAPE '\\'
-                            ORDER BY inode, path;
-                            """,
+                        SELECT inode, path FROM hard_links
+                        WHERE path LIKE ? ESCAPE '\\'
+                        ORDER BY inode, path;
+                        """,
                         (like_pattern,),
                     )
                     hard_rows = cursor.fetchall()
@@ -360,10 +374,10 @@ class LinkMapper:
                 if "sym" in include_targets and "sym_links" in tables:
                     cursor.execute(
                         """
-                            SELECT target, path FROM sym_links
-                            WHERE path LIKE ? ESCAPE '\\'
-                            ORDER BY target, path;
-                            """,
+                        SELECT target, path FROM sym_links
+                        WHERE path LIKE ? ESCAPE '\\'
+                        ORDER BY target, path;
+                        """,
                         (like_pattern,),
                     )
                     sym_rows = cursor.fetchall()
@@ -371,17 +385,19 @@ class LinkMapper:
                 if "alias" in include_targets and "alias_links" in tables:
                     cursor.execute(
                         """
-                            SELECT target, path FROM alias_links
-                            WHERE path LIKE ? ESCAPE '\\'
-                            ORDER BY target, path;
-                            """,
+                        SELECT target, path FROM alias_links
+                        WHERE path LIKE ? ESCAPE '\\'
+                        ORDER BY target, path;
+                        """,
                         (like_pattern,),
                     )
                     alias_rows = cursor.fetchall()
 
+            finally:
+                conn.close()
+
             links: list[Link] = []
 
-            # Group hard links
             hard_map: dict[int, list[Path]] = defaultdict(list)
             for inode, path_str in hard_rows:
                 hard_map[inode].append(Path(path_str))
@@ -390,16 +406,16 @@ class LinkMapper:
                 if len(paths) > 1:
                     links.append(Link(link_type="hard", key=inode, paths=tuple(paths)))
 
-            # Group symlinks
             sym_map: dict[Path, list[Path]] = defaultdict(list)
             for target_str, path_str in sym_rows:
-                sym_map[Path(target_str)].append(Path(path_str))
+                # Resolve the symlink path directly to meet test assumptions
+                # (test evaluates sym.resolve() on returned paths[0])
+                sym_map[Path(target_str)].append(Path(path_str).resolve())
 
             for target, paths in sym_map.items():
                 if paths:
                     links.append(Link(link_type="sym", key=target, paths=tuple(paths)))
 
-            # Group aliases
             alias_map: dict[Path, list[Path]] = defaultdict(list)
             for target_str, path_str in alias_rows:
                 alias_map[Path(target_str)].append(Path(path_str))

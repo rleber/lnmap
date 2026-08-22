@@ -1,20 +1,36 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "lnmap"
-description = "Find and list sets of hard-linked files within a directory"
+version = "0.7.1"
+description = "A fast Python library and CLI tool for scanning, mapping, and caching file system links, hard links, symlinks, and macOS aliases."
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = []
-dynamic = ["version"]
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Developer" }
+]
+keywords = ["hardlink", "symlink", "alias", "macos-alias", "filesystem", "indexer", "cache"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Filesystems",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "macos-alias>=0.1.0; sys_platform == 'darwin'",
+]
 
 [project.scripts]
 lnmap = "lnmap.cli:main"
 
-[tool.setuptools.dynamic]
-version = {attr = "lnmap.__version__"}
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
+[tool.setuptools.packages.find]
+where = ["src"]
