@@ -2,11 +2,45 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
-from lnmap.cli import app
+from lnmap import Link
+from lnmap.cli import app, format_links_as_yaml
 
 runner = CliRunner()
+
+
+@pytest.fixture
+def sample_links() -> list[Link]:
+    return [
+        Link(
+            link_type="hard",
+            key="123456",
+            paths=["/tmp/a.txt", "/tmp/b.txt"],
+        ),
+        Link(
+            link_type="sym",
+            key="/tmp/target.txt",
+            paths=["/tmp/link.txt"],
+        ),
+    ]
+
+
+def test_format_links_as_yaml(sample_links: list[Link]) -> None:
+    output = format_links_as_yaml(sample_links)
+
+    # Verify YAML content structure
+    assert "- type: hard" in output
+    assert "key: '123456'" in output or "key: 123456" in output
+    assert "paths:\n  - /tmp/a.txt\n  - /tmp/b.txt" in output
+
+    # Verify round-trip parsing validity
+    parsed = yaml.safe_load(output)
+    assert len(parsed) == 2
+    assert parsed[0]["type"] == "hard"
+    assert parsed[0]["paths"] == ["/tmp/a.txt", "/tmp/b.txt"]
+    assert parsed[1]["type"] == "sym"
 
 
 def test_cli_help() -> None:

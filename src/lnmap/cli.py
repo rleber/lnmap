@@ -12,7 +12,7 @@ import typer
 import yaml
 from typer import Argument, Option
 
-from . import LinkMapper, __version__
+from . import Link, LinkMapper, __version__
 
 app = typer.Typer(
     name="lnmap",
@@ -167,26 +167,9 @@ def list_links(
     links = mapper.find_links(include=include)
 
     if output_format == OutputFormat.JSON:
-        json_data = [
-            {
-                "type": link.link_type,
-                "key": str(link.key),
-                "paths": [str(p) for p in link.paths],
-            }
-            for link in links
-        ]
-        print(json.dumps(json_data, indent=2))
+        print(format_links_as_json(links))
     elif output_format == OutputFormat.YAML:
-        yaml_data = [
-            {
-                "type": link.link_type,
-                "key": str(link.key),
-                "paths": [str(p) for p in link.paths],
-            }
-            for link in links
-        ]
-        # sort_keys=False preserves dict order; default_flow_style=False enforces block structure
-        print(yaml.dump(yaml_data, sort_keys=False, default_flow_style=False))
+        print(format_links_as_yaml(links))
     else:  # Text
         if not links:
             if not quiet:
@@ -196,10 +179,41 @@ def list_links(
         if not quiet:
             print(f"Found {len(links)} link set(s):")
 
-        for link in links:
-            print(f"[{link.link_type}] Key/Target: {link.key}")
-            for p in link.paths:
-                print(f"  <- {p}")
+        print(format_links_as_text(links))
+
+
+def format_links_as_json(links: list[Link]) -> str:
+    json_data = [
+        {
+            "type": link.link_type,
+            "key": str(link.key),
+            "paths": [str(p) for p in link.paths],
+        }
+        for link in links
+    ]
+    return json.dumps(json_data, indent=2)
+
+
+def format_links_as_text(links: list[Link]) -> str:
+    lines = []
+    for link in links:
+        lines.append(f"[{link.link_type}] Key/Target: {link.key}")
+        for p in link.paths:
+            lines.append(f"  <- {p}")
+    return "\n".join(lines)
+
+
+def format_links_as_yaml(links: list[Link]) -> str:
+    yaml_data = [
+        {
+            "type": link.link_type,
+            "key": str(link.key),
+            "paths": [str(p) for p in link.paths],
+        }
+        for link in links
+    ]
+    # sort_keys=False preserves dict order; default_flow_style=False enforces block structure
+    return yaml.dump(yaml_data, sort_keys=False, default_flow_style=False)
 
 
 @app.command()
