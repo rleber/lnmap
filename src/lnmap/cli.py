@@ -30,7 +30,7 @@ class OutputFormat(str, Enum):
 def version_callback(value: bool) -> None:
     """Print program version and exit."""
     if value:
-        typer.echo(f"lnmap {__version__}")
+        print(f"lnmap {__version__}")
         raise typer.Exit()
 
 
@@ -48,7 +48,7 @@ def parse_link_types(types: list[str] | None) -> set[str]:
 
 def loud_logger(count: int) -> None:
     if count % PROGRESS_INTERVAL == 0:
-        typer.echo(f"\rScanning: {count:,} items processed...", err=True, nl=False)
+        print(f"\rScanning: {count:,} items processed...", err=True, nl=False)
 
 
 def quiet_logger(count: int) -> None:
@@ -96,7 +96,7 @@ def index(
     logger = quiet_logger if quiet else loud_logger
     LinkMapper.index(directory, logger)
     if not quiet:
-        typer.echo(f"Updated index for {directory}")
+        print(f"Updated index for {directory}")
 
 
 # 1. Define allowed choices including "all"
@@ -173,20 +173,20 @@ def list_links(
             }
             for link in links
         ]
-        typer.echo(json.dumps(json_data, indent=2))
+        print(json.dumps(json_data, indent=2))
     else:
         if not links:
             if not quiet:
-                typer.echo("No links found.")
+                print("No links found.")
             return
 
         if not quiet:
-            typer.echo(f"Found {len(links)} link set(s):")
+            print(f"Found {len(links)} link set(s):")
 
         for link in links:
-            typer.echo(f"[{link.link_type.upper()}] Key/Target: {link.key}")
+            print(f"[{link.link_type.upper()}] Key/Target: {link.key}")
             for p in link.paths:
-                typer.echo(f"  -> {p}")
+                print(f"  -> {p}")
 
 
 @app.command()
@@ -206,13 +206,13 @@ def indexes(
     """List database indexes found from directory up to root."""
     found_indexes = LinkMapper.indexes(directory)
     if not found_indexes:
-        typer.echo("No index files found.")
+        print("No index files found.")
         return
 
     for idx in found_indexes:
         local_dt = idx.last_modified.astimezone()
         timestamp = local_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
-        typer.echo(f"{timestamp}  {idx.path}")
+        print(f"{timestamp}  {idx.path}")
 
 
 def main() -> None:
