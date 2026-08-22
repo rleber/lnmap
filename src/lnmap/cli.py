@@ -90,59 +90,75 @@ def main(args: Sequence[str] | None = None) -> None:
         parser.print_help()
         sys.exit(1)
 
-    try:
-        if parsed_args.command == "index":
-            target_dir = Path(parsed_args.directory).resolve()
-            LinkMapper.index(target_dir, quiet=parsed_args.quiet)
-            if not parsed_args.quiet:
-                print(f"Updated index for {target_dir}")
+    if parsed_args.command == "index":
+        target_dir = Path(parsed_args.directory).resolve()
+        LinkMapper.index(target_dir, quiet=parsed_args.quiet)
+        if not parsed_args.quiet:
+            print(f"Updated index for {target_dir}")
 
-        elif parsed_args.command == "list":
-            target_dir = Path(parsed_args.directory).resolve()
-            if parsed_args.index:
-                db_path = LinkMapper.index_for(target_dir)
-                LinkMapper.index(db_path)
+    elif parsed_args.command == "list":
+        target_dir = Path(parsed_args.directory).resolve()
+        if parsed_args.index:
+            db_path = LinkMapper.index_for(target_dir)
+            LinkMapper.index(db_path)
 
-            mapper = LinkMapper(target_dir)
-            links = mapper.find_links(include=parsed_args.type)
+        mapper = LinkMapper(target_dir)
+        include = parse_link_types(parsed_args.type)
+        links = mapper.find_links(include=include)
 
-            if parsed_args.format == "json":
-                json_data = [
-                    {
-                        "type": link.link_type,
-                        "key": str(link.key),
-                        "paths": [str(p) for p in link.paths],
-                    }
-                    for link in links
-                ]
-                print(json.dumps(json_data, indent=2))
-            else:
-                if not links:
-                    if not parsed_args.quiet:
-                        print("No links found.")
-                    return
-
+        if parsed_args.format == "json":
+            json_data = [
+                {
+                    "type": link.link_type,
+                    "key": str(link.key),
+                    "paths": [str(p) for p in link.paths],
+                }
+                for link in links
+            ]
+            print(json.dumps(json_data, indent=2))
+        else:
+            if not links:
                 if not parsed_args.quiet:
-                    print(f"Found {len(links)} link set(s):")
-
-                for link in links:
-                    print(f"[{link.link_type.upper()}] Key/Target: {link.key}")
-                    for p in link.paths:
-                        print(f"  -> {p}")
-
-        elif parsed_args.command == "indexes":
-            target_dir = Path(parsed_args.directory).resolve()
-            found_indexes = LinkMapper.indexes(target_dir)
-            if not found_indexes:
-                print("No index files found.")
+                    print("No links found.")
                 return
 
-            for idx in found_indexes:
-                print(f"{idx.path} (last modified: {idx.last_modified})")
+            if not parsed_args.quiet:
+                print(f"Found {len(links)} link set(s):")
 
-    except Exception as e:
-        sys.stderr.write(f"Error: {e}\n")
-        sys.exit(1)
+            for link in links:
+                print(f"[{link.link_type.upper()}] Key/Target: {link.key}")
+                for p in link.paths:
+                    print(f"  -> {p}")
+
+    elif parsed_args.command == "indexes":
+        target_dir = Path(parsed_args.directory).resolve()
+        found_indexes = LinkMapper.indexes(target_dir)
+        if not found_indexes:
+            print("No index files found.")
+            return
+
+        for idx in found_indexes:
+            print(f"{idx.path} (last modified: {idx.last_modified})")
+
+
+def parse_link_types(types: str) -> set[str]:
+    """Parses include argument into a set of target link types ('hard', 'sym', 'alias')."""
+    valid_types = {"hard", "sym", "alias"}
+    valid_choices = valid_types | {"all", "none"}
+
+    raw_types = [item.strip() for item in types.split(",") if item.strip()]
+    targets: set[str] = set()
+    for item in raw_types:
+        if item not in valid_choices:
+            raise ValueError(
+                f"Invalid option '{item}'. Must be one or more of: hard, sym, alias, all, none."
+            )
+        if item == "all":
+            return {"hard", "sym", "alias"}
+        elif item != "none":
+            targets.add(item)
+
+    return targets
 
 
 if __name__ == "__main__":

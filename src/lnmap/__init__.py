@@ -21,9 +21,8 @@ DEFAULT_DB_NAME = ".lnmap_index.db"
 PROGRESS_INTERVAL = 1000
 
 # TODO code smell
-UpdateMode = str | Iterable[str] | bool
+UpdateMode = Iterable[str]
 
-# TODO Move this to macos_alias library
 if sys.platform == "darwin":
     try:
         from macos_alias import is_alias, target_of
@@ -84,6 +83,7 @@ class LinkMapper:
         """Returns the name of the index database corresponding to a directory"""
         return Path(directory) / DEFAULT_DB_NAME
 
+    # TODO remove str | Path throughout
     @staticmethod
     def index_for(directory: str | Path) -> Path:
         """Finds the best existing index database using parent traversal, or defaults to <directory>/.lnmap_index.db."""
@@ -126,38 +126,6 @@ class LinkMapper:
             current = current.parent
 
         return found_indexes
-
-    # TODO This is human-interaction, it should be in the cli
-    @classmethod
-    def _parse_update_modes(cls, update: UpdateMode) -> set[str]:
-        """Parses include argument into a set of target link types ('hard', 'sym', 'alias')."""
-        if isinstance(update, bool):
-            return {"hard", "sym", "alias"} if update else set()
-
-        if isinstance(update, str):
-            raw_items = [item.strip() for item in update.split(",") if item.strip()]
-        else:
-            raw_items = [str(item) for item in update]
-
-        valid_types = {"hard", "sym", "alias"}
-        valid_choices = valid_types | {"all", "none"}
-        targets: set[str] = set()
-        has_all = False
-
-        for item in raw_items:
-            if item not in valid_choices:
-                raise ValueError(
-                    f"Invalid option '{item}'. Must be one or more of: hard, sym, alias, all, none."
-                )
-            if item == "all":
-                has_all = True
-            elif item != "none":
-                targets.add(item)
-
-        if has_all:
-            return {"hard", "sym", "alias"}
-
-        return targets
 
     @staticmethod
     def _save_to_db(
@@ -325,16 +293,13 @@ class LinkMapper:
             resolved_db_path, hard_records, sym_records, alias_records
         )
 
-    def find_links(self, include: UpdateMode = "all") -> list[Link]:
+    def find_links(self, include: set[str]) -> list[Link]:
         """
         Retrieves link records from the database matching specified include types,
         using indexed LIKE queries to efficiently fetch only paths under self.directory.
         """
-        if not self.db_path.exists():
-            return []
 
-        include_targets = self._parse_update_modes(include)
-        if not include_targets:
+        if not include:
             return []
 
         dir_str = str(self.directory.resolve())
@@ -360,7 +325,7 @@ class LinkMapper:
                 sym_rows = []
                 alias_rows = []
 
-                if "hard" in include_targets and "hard_links" in tables:
+                if "hard" in include and "hard_links" in tables:
                     cursor.execute(
                         """
                         SELECT inode, path FROM hard_links
@@ -371,7 +336,7 @@ class LinkMapper:
                     )
                     hard_rows = cursor.fetchall()
 
-                if "sym" in include_targets and "sym_links" in tables:
+                if "sym" in include and "sym_links" in tables:
                     cursor.execute(
                         """
                         SELECT target, path FROM sym_links
@@ -382,7 +347,7 @@ class LinkMapper:
                     )
                     sym_rows = cursor.fetchall()
 
-                if "alias" in include_targets and "alias_links" in tables:
+                if "alias" in include and "alias_links" in tables:
                     cursor.execute(
                         """
                         SELECT target, path FROM alias_links
