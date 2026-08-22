@@ -20,7 +20,6 @@ __version__ = "0.7.1"
 DEFAULT_DB_NAME = ".lnmap_index.db"
 PROGRESS_INTERVAL = 1000
 
-# TODO code smell
 UpdateMode = Iterable[str]
 
 if sys.platform == "darwin":

@@ -11,6 +11,7 @@ from pathlib import Path
 from . import LinkMapper, __version__
 
 
+# TODO Try refactoring using Typer
 def main(args: Sequence[str] | None = None) -> None:
     """CLI entrypoint for index generation and link queries."""
     parser = argparse.ArgumentParser(
