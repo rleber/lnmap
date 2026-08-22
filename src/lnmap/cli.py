@@ -37,18 +37,13 @@ def version_callback(value: bool) -> None:
 VALID_TYPES = {"all", "alias", "hard", "sym"}
 
 
-def parse_link_types(types: str) -> set[str]:
+def parse_link_types(types: list[str] | None) -> set[str]:
     """Parse comma-separated link type argument into a normalized set."""
-
-    types = [item.strip() for item in types.split(",") if item.strip()]
-    if bad_type := next((type for type in types if type not in VALID_TYPES), None):
-        raise typer.BadParameter(
-            f"Invalid type '{bad_type}'. Must be {', '.join(VALID_TYPES)}."
-        )
-
-    if "all" in types:
-        return VALID_TYPES - {"all"}
-    return set(types)
+    if types is None or ValidTypes.ALL in types:
+        types = {item.value for item in ValidTypes if item != ValidTypes.ALL}
+    else:
+        types = {item.value for item in types}
+    return types
 
 
 def loud_logger(count: int) -> None:
@@ -104,6 +99,14 @@ def index(
         typer.echo(f"Updated index for {directory}")
 
 
+# 1. Define allowed choices including "all"
+class ValidTypes(str, Enum):
+    ALL = "all"
+    ALIAS = "alias"
+    HARDLINK = "hard"
+    SYMLINK = "sym"
+
+
 @app.command(name="list")
 def list_links(
     directory: Annotated[
@@ -117,14 +120,15 @@ def list_links(
             resolve_path=True,
         ),
     ] = Path("."),
-    link_type: Annotated[
-        str,
+    link_types: Annotated[
+        list[ValidTypes] | None,
         Option(
-            "-t",
-            "--type",
-            help="Link types to include: hard, sym, alias, or all (comma-separated).",
+            ...,
+            "--fruit",
+            "-f",
+            help="Select choices, or 'all' to select everything.",
         ),
-    ] = "all",
+    ] = None,
     force_index: Annotated[
         bool,
         Option(
@@ -157,7 +161,7 @@ def list_links(
         LinkMapper.index(db_path, logger)
 
     mapper = LinkMapper(directory)
-    include = parse_link_types(link_type)
+    include = parse_link_types(link_types)
     links = mapper.find_links(include=include)
 
     if output_format == OutputFormat.JSON:
@@ -206,7 +210,9 @@ def indexes(
         return
 
     for idx in found_indexes:
-        typer.echo(f"{idx.path} (last modified: {idx.last_modified})")
+        local_dt = idx.last_modified.astimezone()
+        timestamp = local_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+        typer.echo(f"{timestamp}  {idx.path}")
 
 
 def main() -> None:
