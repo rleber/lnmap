@@ -356,9 +356,7 @@ class LinkMapper:
 
             sym_map: dict[Path, list[Path]] = defaultdict(list)
             for target_str, path_str in sym_rows:
-                # Resolve the symlink path directly to meet test assumptions
-                # (test evaluates sym.resolve() on returned paths[0])
-                sym_map[Path(target_str)].append(Path(path_str).resolve())
+                sym_map[Path(target_str)].append(Path(path_str))
 
             for target, paths in sym_map.items():
                 if paths:
