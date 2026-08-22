@@ -1,153 +1,38 @@
-"""
-lnmap - Command Line Interface
-"""
+"""lnmap - Command Line Interface refactored with Typer."""
 
-import argparse
 import json
-import sys
-from collections.abc import Sequence
+from enum import Enum
 from pathlib import Path
+from typing import Annotated
+
+import typer
+from typer import Argument, Option
 
 from . import LinkMapper, __version__
 
+app = typer.Typer(
+    name="lnmap",
+    help="Scans, maps, and caches filesystem links (hard links, symlinks, macOS aliases).",
+    add_completion=False,
+)
 
-# TODO Try refactoring using Typer
-def main(args: Sequence[str] | None = None) -> None:
-    """CLI entrypoint for index generation and link queries."""
-    parser = argparse.ArgumentParser(
-        prog="lnmap",
-        description="Scans, maps, and caches filesystem links (hard links, symlinks, macOS aliases).",
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"%(prog)s {__version__}",
-    )
+PROGRESS_INTERVAL = 1000
 
-    subparsers = parser.add_subparsers(dest="command", help="Sub-commands")
 
-    # index command
-    index_parser = subparsers.add_parser("index", help="Reindex a directory")
-    index_parser.add_argument(
-        "directory",
-        nargs="?",
-        default=".",
-        help="Directory to scan and index (default: current directory)",
-    )
-    index_parser.add_argument(
-        "-q",
-        "--quiet",
-        action="store_true",
-        help="Be quiet. Disables progress indicator",
-    )
+class OutputFormat(str, Enum):
+    TEXT = "text"
+    JSON = "json"
 
-    # list subcommand
-    list_parser = subparsers.add_parser("list", help="Query indexed links")
-    list_parser.add_argument(
-        "directory",
-        nargs="?",
-        default=".",
-        help="Directory to search within (default: current directory)",
-    )
-    list_parser.add_argument(
-        "-t",
-        "--type",
-        default="all",
-        help="Link types to include: hard, sym, alias, or all (comma-separated, default: all)",
-    )
-    list_parser.add_argument(
-        "-I",
-        "--index",
-        action="store_true",
-        help="Force index update before searching",
-    )
-    list_parser.add_argument(
-        "-q",
-        "--quiet",
-        action="store_true",
-        help="Suppress human-readable summary header",
-    )
-    list_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="Output format (default: text)",
-    )
 
-    # indexes command
-    indexes_parser = subparsers.add_parser(
-        "indexes", help="List database indexes found from directory up to root"
-    )
-    indexes_parser.add_argument(
-        "directory",
-        nargs="?",
-        default=".",
-        help="Directory to start searching from (default: current directory)",
-    )
-
-    parsed_args = parser.parse_args(args if args is not None else sys.argv[1:])
-
-    if not parsed_args.command:
-        parser.print_help()
-        sys.exit(1)
-
-    if parsed_args.command == "index":
-        target_dir = Path(parsed_args.directory).resolve()
-        if parsed_args.quiet:
-            logger = quiet_logger
-        else:
-            logger = loud_logger
-        LinkMapper.index(target_dir, logger)
-        if not parsed_args.quiet:
-            print(f"Updated index for {target_dir}")
-
-    elif parsed_args.command == "list":
-        target_dir = Path(parsed_args.directory).resolve()
-        if parsed_args.index:
-            db_path = LinkMapper.index_for(target_dir)
-            LinkMapper.index(db_path)
-
-        mapper = LinkMapper(target_dir)
-        include = parse_link_types(parsed_args.type)
-        links = mapper.find_links(include=include)
-
-        if parsed_args.format == "json":
-            json_data = [
-                {
-                    "type": link.link_type,
-                    "key": str(link.key),
-                    "paths": [str(p) for p in link.paths],
-                }
-                for link in links
-            ]
-            print(json.dumps(json_data, indent=2))
-        else:
-            if not links:
-                if not parsed_args.quiet:
-                    print("No links found.")
-                return
-
-            if not parsed_args.quiet:
-                print(f"Found {len(links)} link set(s):")
-
-            for link in links:
-                print(f"[{link.link_type.upper()}] Key/Target: {link.key}")
-                for p in link.paths:
-                    print(f"  -> {p}")
-
-    elif parsed_args.command == "indexes":
-        target_dir = Path(parsed_args.directory).resolve()
-        found_indexes = LinkMapper.indexes(target_dir)
-        if not found_indexes:
-            print("No index files found.")
-            return
-
-        for idx in found_indexes:
-            print(f"{idx.path} (last modified: {idx.last_modified})")
+def version_callback(value: bool) -> None:
+    """Print program version and exit."""
+    if value:
+        typer.echo(f"lnmap {__version__}")
+        raise typer.Exit()
 
 
 def parse_link_types(types: str) -> set[str]:
-    """Parses include argument into a set of target link types ('hard', 'sym', 'alias')."""
+    """Parse comma-separated link type argument into a normalized set."""
     valid_types = {"hard", "sym", "alias"}
     valid_choices = valid_types | {"all", "none"}
 
@@ -155,28 +40,177 @@ def parse_link_types(types: str) -> set[str]:
     targets: set[str] = set()
     for item in raw_types:
         if item not in valid_choices:
-            raise ValueError(
+            raise typer.BadParameter(
                 f"Invalid option '{item}'. Must be one or more of: hard, sym, alias, all, none."
             )
         if item == "all":
             return {"hard", "sym", "alias"}
-        elif item != "none":
+        if item != "none":
             targets.add(item)
 
     return targets
 
 
-PROGRESS_INTERVAL = 1000
-
-
-def loud_logger(count):
+def loud_logger(count: int) -> None:
     if count % PROGRESS_INTERVAL == 0:
-        sys.stderr.write(f"\rScanning: {count:,} items processed...")
-        sys.stderr.flush()
+        typer.echo(f"\rScanning: {count:,} items processed...", err=True, nl=False)
 
 
-def quiet_logger(count):
+def quiet_logger(count: int) -> None:
     pass
+
+
+@app.callback()
+def global_options(
+    version: Annotated[
+        bool | None,
+        Option(
+            "--version",
+            callback=version_callback,
+            is_eager=True,
+            help="Show application version and exit.",
+        ),
+    ] = None,
+) -> None:
+    """Global callback for top-level flags like --version."""
+
+
+@app.command()
+def index(
+    directory: Annotated[
+        Path,
+        Argument(
+            help="Directory to scan and index.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+        ),
+    ] = Path("."),
+    quiet: Annotated[
+        bool,
+        Option(
+            "-q",
+            "--quiet",
+            help="Be quiet. Disables progress indicator.",
+        ),
+    ] = False,
+) -> None:
+    """Reindex a directory."""
+    logger = quiet_logger if quiet else loud_logger
+    LinkMapper.index(directory, logger)
+    if not quiet:
+        typer.echo(f"Updated index for {directory}")
+
+
+@app.command(name="list")
+def list_links(
+    directory: Annotated[
+        Path,
+        Argument(
+            help="Directory to search within.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+        ),
+    ] = Path("."),
+    link_type: Annotated[
+        str,
+        Option(
+            "-t",
+            "--type",
+            help="Link types to include: hard, sym, alias, or all (comma-separated).",
+        ),
+    ] = "all",
+    force_index: Annotated[
+        bool,
+        Option(
+            "-I",
+            "--index",
+            help="Force index update before searching.",
+        ),
+    ] = False,
+    quiet: Annotated[
+        bool,
+        Option(
+            "-q",
+            "--quiet",
+            help="Suppress human-readable summary header.",
+        ),
+    ] = False,
+    output_format: Annotated[
+        OutputFormat,
+        Option(
+            "--format",
+            case_sensitive=False,
+            help="Output format.",
+        ),
+    ] = OutputFormat.TEXT,
+) -> None:
+    """Query indexed links."""
+    if force_index:
+        db_path = LinkMapper.index_for(directory)
+        LinkMapper.index(db_path)
+
+    mapper = LinkMapper(directory)
+    include = parse_link_types(link_type)
+    links = mapper.find_links(include=include)
+
+    if output_format == OutputFormat.JSON:
+        json_data = [
+            {
+                "type": link.link_type,
+                "key": str(link.key),
+                "paths": [str(p) for p in link.paths],
+            }
+            for link in links
+        ]
+        typer.echo(json.dumps(json_data, indent=2))
+    else:
+        if not links:
+            if not quiet:
+                typer.echo("No links found.")
+            return
+
+        if not quiet:
+            typer.echo(f"Found {len(links)} link set(s):")
+
+        for link in links:
+            typer.echo(f"[{link.link_type.upper()}] Key/Target: {link.key}")
+            for p in link.paths:
+                typer.echo(f"  -> {p}")
+
+
+@app.command()
+def indexes(
+    directory: Annotated[
+        Path,
+        Argument(
+            help="Directory to start searching from.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+        ),
+    ] = Path("."),
+) -> None:
+    """List database indexes found from directory up to root."""
+    found_indexes = LinkMapper.indexes(directory)
+    if not found_indexes:
+        typer.echo("No index files found.")
+        return
+
+    for idx in found_indexes:
+        typer.echo(f"{idx.path} (last modified: {idx.last_modified})")
+
+
+def main() -> None:
+    """CLI entrypoint wrapper."""
+    app()
 
 
 if __name__ == "__main__":
