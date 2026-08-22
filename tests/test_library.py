@@ -37,7 +37,7 @@ def test_hard_link_indexing(root_dir: Path) -> None:
         pytest.skip("Hard links not supported on this filesystem/OS")
 
     db_path = LinkMapper.index_for(root_dir)
-    LinkMapper.index(db_path.parent)
+    LinkMapper.index(db_path.parent, print)
 
     mapper = LinkMapper(root_dir)
     links = mapper.find_links(include="hard")
@@ -59,7 +59,7 @@ def test_symlink_indexing(root_dir: Path) -> None:
         pytest.skip("Symlinks not supported on this OS")
 
     db_path = LinkMapper.index_for(root_dir)
-    LinkMapper.index(db_path.parent)
+    LinkMapper.index(db_path.parent, print)
 
     mapper = LinkMapper(root_dir)
     links = mapper.find_links(include="sym")

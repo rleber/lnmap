@@ -93,7 +93,11 @@ def main(args: Sequence[str] | None = None) -> None:
 
     if parsed_args.command == "index":
         target_dir = Path(parsed_args.directory).resolve()
-        LinkMapper.index(target_dir, quiet=parsed_args.quiet)
+        if parsed_args.quiet:
+            logger = quiet_logger
+        else:
+            logger = loud_logger
+        LinkMapper.index(target_dir, logger)
         if not parsed_args.quiet:
             print(f"Updated index for {target_dir}")
 
@@ -160,6 +164,19 @@ def parse_link_types(types: str) -> set[str]:
             targets.add(item)
 
     return targets
+
+
+PROGRESS_INTERVAL = 1000
+
+
+def loud_logger(count):
+    if count % PROGRESS_INTERVAL == 0:
+        sys.stderr.write(f"\rScanning: {count:,} items processed...")
+        sys.stderr.flush()
+
+
+def quiet_logger(count):
+    pass
 
 
 if __name__ == "__main__":

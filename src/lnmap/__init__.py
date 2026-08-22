@@ -11,14 +11,13 @@ import os
 import sqlite3
 import sys
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 __version__ = "0.7.1"
 DEFAULT_DB_NAME = ".lnmap_index.db"
-PROGRESS_INTERVAL = 1000
 
 UpdateMode = Iterable[str]
 
@@ -202,9 +201,8 @@ class LinkMapper:
                 "CREATE INDEX IF NOT EXISTS idx_alias_path ON alias_links(path COLLATE BINARY, target);"
             )
 
-    # TODO The progress indicator has a bit of a smell. Should it be passed in from cli
     @staticmethod
-    def index(scan_directory: Path, quiet: bool = False) -> None:
+    def index(scan_directory: Path, logger: Callable) -> None:
         """
         Scans the directory containing the given database file for all link types
         and overwrites their information in the database.
@@ -230,11 +228,7 @@ class LinkMapper:
                     continue
 
                 scanned_count += 1
-                if not quiet and (scanned_count % PROGRESS_INTERVAL == 0):
-                    sys.stderr.write(
-                        f"\rScanning: {scanned_count:,} items processed..."
-                    )
-                    sys.stderr.flush()
+                logger(scanned_count)
 
                 try:
                     if path.is_symlink():
@@ -262,10 +256,6 @@ class LinkMapper:
 
                 except (OSError, PermissionError):
                     continue
-
-        if not quiet:
-            sys.stderr.write(f"\rScanning complete. {scanned_count:,} items checked.\n")
-            sys.stderr.flush()
 
         hard_records: list[tuple[int, str]] = []
         sym_records: list[tuple[str, str]] = []
