@@ -1,237 +1,223 @@
-"""
-lnmap - Command Line Interface
+"""lnmap - Command Line Interface
 
-Parses CLI options and handles execution for subcommands:
-`list`, `index`, and `indexes`.
+Catalog hard links, symlinks and aliases in a directory
 """
 
-import argparse
-import datetime
 import json
-import sys
+from enum import Enum
 from pathlib import Path
+from typing import Annotated
 
-from lnmap import DEFAULT_DB_NAME, Link, LinkMapper, __version__
+import typer
+from typer import Argument, Option
 
+from . import LinkMapper, __version__
 
-def format_path(path: Path) -> str:
-    """Formats a Path object, wrapping it in double quotes and escaping special characters if needed."""
-    path_str = str(path)
-    special_chars = set(" \t\n\r\f\v\"'\\$`!&*()[]{};<>?|~#")
+app = typer.Typer(
+    name="lnmap",
+    help="Scans, maps, and caches filesystem links (hard links, symlinks, macOS aliases).",
+    add_completion=False,
+)
 
-    if any(c in special_chars for c in path_str):
-        escaped = (
-            path_str.replace("\\", "\\\\")
-            .replace('"', '\\"')
-            .replace("$", "\\$")
-            .replace("`", "\\`")
-        )
-        return f'"{escaped}"'
-    return path_str
+PROGRESS_INTERVAL = 1000
 
 
-def print_links(
-    links: list[Link],
-    output_format: str = "text",
-) -> None:
-    """Prints link mapping results to stdout in text or jsonlines format."""
-    if output_format == "json":
-        for link in links:
-            if link.link_type == "hard":
-                record = {
-                    "type": "hard",
-                    "inode": link.key,
-                    "paths": [str(p) for p in link.paths],
-                }
-            else:
-                record = {
-                    "type": link.link_type,
-                    "target": str(link.key),
-                    "paths": [str(p) for p in link.paths],
-                }
-            print(json.dumps(record))
+class OutputFormat(str, Enum):
+    TEXT = "text"
+    JSON = "json"
+
+
+def version_callback(value: bool) -> None:
+    """Print program version and exit."""
+    if value:
+        print(f"lnmap {__version__}")
+        raise typer.Exit()
+
+
+VALID_TYPES = {"all", "alias", "hard", "sym"}
+
+
+def parse_link_types(types: list[str] | None) -> set[str]:
+    """Parse comma-separated link type argument into a normalized set."""
+    if types is None or ValidTypes.ALL in types:
+        types = {item.value for item in ValidTypes if item != ValidTypes.ALL}
     else:
+        types = {item.value for item in types}
+    return types
+
+
+def loud_logger(count: int) -> None:
+    if count % PROGRESS_INTERVAL == 0:
+        print(f"\rScanning: {count:,} items processed...", err=True, nl=False)
+
+
+def quiet_logger(count: int) -> None:
+    pass
+
+
+@app.callback()
+def global_options(
+    version: Annotated[
+        bool | None,
+        Option(
+            "--version",
+            callback=version_callback,
+            is_eager=True,
+            help="Show application version and exit.",
+        ),
+    ] = None,
+) -> None:
+    """Global callback for top-level flags like --version."""
+
+
+@app.command()
+def index(
+    directory: Annotated[
+        Path,
+        Argument(
+            help="Directory to scan and index.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+        ),
+    ] = Path("."),
+    quiet: Annotated[
+        bool,
+        Option(
+            "-q",
+            "--quiet",
+            help="Be quiet. Disables progress indicator.",
+        ),
+    ] = False,
+) -> None:
+    """Reindex a directory."""
+    logger = quiet_logger if quiet else loud_logger
+    LinkMapper.index(directory, logger)
+    if not quiet:
+        print(f"Updated index for {directory}")
+
+
+# 1. Define allowed choices including "all"
+class ValidTypes(str, Enum):
+    ALL = "all"
+    ALIAS = "alias"
+    HARDLINK = "hard"
+    SYMLINK = "sym"
+
+
+@app.command(name="list")
+def list_links(
+    directory: Annotated[
+        Path,
+        Argument(
+            help="Directory to search within.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+        ),
+    ] = Path("."),
+    link_types: Annotated[
+        list[ValidTypes] | None,
+        Option(
+            ...,
+            "--fruit",
+            "-f",
+            help="Select choices, or 'all' to select everything.",
+        ),
+    ] = None,
+    force_index: Annotated[
+        bool,
+        Option(
+            "-I",
+            "--index",
+            help="Force index update before searching.",
+        ),
+    ] = False,
+    quiet: Annotated[
+        bool,
+        Option(
+            "-q",
+            "--quiet",
+            help="Quiet mode.",
+        ),
+    ] = False,
+    output_format: Annotated[
+        OutputFormat,
+        Option(
+            "--format",
+            case_sensitive=False,
+            help="Output format.",
+        ),
+    ] = OutputFormat.TEXT,
+) -> None:
+    """Query indexed links."""
+    if force_index:
+        db_path = LinkMapper.index_for(directory)
+        logger = quiet_logger if quiet else loud_logger
+        LinkMapper.index(db_path, logger)
+
+    mapper = LinkMapper(directory)
+    include = parse_link_types(link_types)
+    links = mapper.find_links(include=include)
+
+    if output_format == OutputFormat.JSON:
+        json_data = [
+            {
+                "type": link.link_type,
+                "key": str(link.key),
+                "paths": [str(p) for p in link.paths],
+            }
+            for link in links
+        ]
+        print(json.dumps(json_data, indent=2))
+    else:
+        if not links:
+            if not quiet:
+                print("No links found.")
+            return
+
+        if not quiet:
+            print(f"Found {len(links)} link set(s):")
+
         for link in links:
-            paths_str = ", ".join(format_path(p) for p in link.paths)
-            if link.link_type == "hard":
-                print(f"{link.key} #= {paths_str}")
-            elif link.link_type == "sym":
-                target_path = Path(str(link.key))
-                print(f"{format_path(target_path)} @= {paths_str}")
-            elif link.link_type == "alias":
-                target_path = Path(str(link.key))
-                print(f"{format_path(target_path)} a= {paths_str}")
+            print(f"[{link.link_type.upper()}] Key/Target: {link.key}")
+            for p in link.paths:
+                print(f"  -> {p}")
 
 
-def _format_timestamp(db_path: Path) -> str:
-    """Returns a human-readable string of the last modified time of the DB file."""
-    try:
-        mtime = db_path.stat().st_mtime
-        dt = datetime.datetime.fromtimestamp(mtime)
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
-    except OSError:
-        return "Unknown"
-
-
-def handle_indexes(args: argparse.Namespace) -> None:
-    """Handles the 'indexes' subcommand to list parent database index files."""
-    try:
-        found_indexes = LinkMapper.indexes(args.directory)
-    except ValueError as e:
-        sys.stderr.write(f"Error: {e}\n")
-        sys.exit(1)
-
+@app.command()
+def indexes(
+    directory: Annotated[
+        Path,
+        Argument(
+            help="Directory to start searching from.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+        ),
+    ] = Path("."),
+) -> None:
+    """List database indexes found from directory up to root."""
+    found_indexes = LinkMapper.indexes(directory)
     if not found_indexes:
-        sys.stdout.write(f"No {DEFAULT_DB_NAME} files found in parent hierarchy.\n")
+        print("No index files found.")
         return
 
-    for idx_path in found_indexes:
-        ts = _format_timestamp(idx_path)
-        sys.stdout.write(f"{ts}  {idx_path}\n")
+    for idx in found_indexes:
+        local_dt = idx.last_modified.astimezone()
+        timestamp = local_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+        print(f"{timestamp}  {idx.path}")
 
 
-def handle_list(args: argparse.Namespace) -> None:
-    """Handles the 'list' subcommand."""
-    db_path = getattr(args, "db_path", None)
-    try:
-        mapper = LinkMapper(directory=args.directory, db_path=db_path)
-
-        # If the user requested an index update before listing
-        if args.index != "none":
-            mapper.index(update=args.index, progress=args.progress)
-
-        links = mapper.find_links()
-        print_links(links, output_format=args.format)
-    except ValueError as e:
-        sys.stderr.write(f"Error: {e}\n")
-        sys.exit(1)
-
-
-def handle_index(args: argparse.Namespace) -> None:
-    """Handles the 'index' subcommand."""
-    db_path = getattr(args, "db_path", None)
-    try:
-        mapper = LinkMapper(directory=args.directory, db_path=db_path)
-        mapper.index(update="all", progress=not args.quiet)
-    except ValueError as e:
-        sys.stderr.write(f"Error: {e}\n")
-        sys.exit(1)
-
-
-def main(args: list[str] | None = None) -> None:
-    if args is None:
-        args = sys.argv[1:]
-
-    parser = argparse.ArgumentParser(
-        prog="lnmap",
-        description="Find and manage hard links, symlinks, and macOS aliases.",
-    )
-    parser.add_argument(
-        "--db-path",
-        type=Path,
-        default=None,
-        help=f"Custom path for SQLite database file (default: <directory>/{DEFAULT_DB_NAME})",
-    )
-    parser.add_argument(
-        "-v",
-        "--version",
-        action="version",
-        version=f"%(prog)s {__version__}",
-        help="Show program's version number and exit.",
-    )
-
-    subparsers = parser.add_subparsers(dest="subcommand", help="Available subcommands")
-
-    # Subcommand: list
-    list_parser = subparsers.add_parser(
-        "list",
-        help="Find and list links in a directory.",
-        description="Find sets of files within a directory that share the same inode (hard links), point to targets (symlinks), or macOS aliases.",
-    )
-    list_parser.add_argument(
-        "--db-path",
-        type=Path,
-        default=argparse.SUPPRESS,
-        help=f"Custom path for SQLite database file (default: <directory>/{DEFAULT_DB_NAME})",
-    )
-    list_parser.add_argument(
-        "-i",
-        "--index",
-        default="none",
-        help="Specify which link types to update in the SQLite cache: hard, sym, alias, all, none, or comma-separated combinations like 'hard,alias' (default: none if omitted).",
-    )
-    list_parser.add_argument(
-        "-p",
-        "--progress",
-        action="store_true",
-        help="Display scanning progress indicator on stderr.",
-    )
-    list_parser.add_argument(
-        "-f",
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="Output format: text (default) or json (jsonlines).",
-    )
-    list_parser.add_argument(
-        "directory",
-        type=Path,
-        nargs="?",
-        default=Path("."),
-        help="Directory to scan (default: current directory)",
-    )
-
-    # Subcommand: index
-    index_parser = subparsers.add_parser(
-        "index",
-        help="Update index database of all links in a directory",
-        description="Scans for all link forms (hard links, symlinks, aliases) and populates or overwrites the SQLite cache without printing links.",
-    )
-    index_parser.add_argument(
-        "--db-path",
-        type=Path,
-        default=argparse.SUPPRESS,
-        help=f"Custom path for SQLite database file (default: <directory>/{DEFAULT_DB_NAME})",
-    )
-    index_parser.add_argument(
-        "-q",
-        "--quiet",
-        action="store_true",
-        help="Suppress scanning progress indicator on stderr.",
-    )
-    index_parser.add_argument(
-        "directory",
-        type=Path,
-        nargs="?",
-        default=Path("."),
-        help="Directory to scan (default: current directory)",
-    )
-
-    # Subcommand: indexes
-    indexes_parser = subparsers.add_parser(
-        "indexes",
-        help="Find and list index database files up the directory tree.",
-    )
-    indexes_parser.add_argument(
-        "directory",
-        type=Path,
-        nargs="?",
-        default=Path("."),
-        help="Starting directory to search upward from (default: current directory)",
-    )
-
-    parsed_args = parser.parse_args(args)
-
-    if parsed_args.subcommand is None:
-        parser.print_help()
-        sys.exit(0)
-
-    if parsed_args.subcommand == "list":
-        handle_list(parsed_args)
-    elif parsed_args.subcommand == "index":
-        handle_index(parsed_args)
-    elif parsed_args.subcommand == "indexes":
-        handle_indexes(parsed_args)
+def main() -> None:
+    """CLI entrypoint wrapper."""
+    app()
 
 
 if __name__ == "__main__":
