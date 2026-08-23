@@ -189,29 +189,101 @@ def list_links(
 
     mapper = LinkMapper(directory)
     include = parse_link_types(link_types)
-    res = {}
+    regexps = {}
     if target:
-        res["target"] = target
+        regexps["target"] = target
     if inode:
-        res["inode"] = inode
+        regexps["inode"] = inode
     if path:
-        res["path"] = path
-    links = mapper.find_links(include=include, res=res)
+        regexps["path"] = path
+    links = mapper.find_links(include=include, regexps=regexps)
+    print_links(links, output_format, quiet=quiet)
 
-    if output_format == OutputFormat.JSON:
-        print(format_links_as_json(links))
-    elif output_format == OutputFormat.YAML:
-        print(format_links_as_yaml(links))
+
+@app.command(name="group")
+def list_groups(
+    target: Annotated[
+        Path,
+        Argument(
+            help="Path to search for alias/links around.",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            resolve_path=True,
+        ),
+    ],
+    directory: Annotated[
+        Path,
+        Argument(
+            help="Directory to search within.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+        ),
+    ] = Path("."),
+    link_types: Annotated[
+        list[ValidTypes] | None,
+        Option(
+            ...,
+            "--type",
+            "-t",
+            help="Select choices, or 'all' to select everything.",
+        ),
+    ] = None,
+    force_index: Annotated[
+        bool,
+        Option(
+            "-I",
+            "--index",
+            help="Force index update before searching.",
+        ),
+    ] = False,
+    quiet: Annotated[
+        bool,
+        Option(
+            "-q",
+            "--quiet",
+            help="Quiet mode.",
+        ),
+    ] = False,
+    output_format: Annotated[
+        OutputFormat,
+        Option(
+            "--format",
+            case_sensitive=False,
+            help="Output format.",
+        ),
+    ] = OutputFormat.TEXT,
+) -> None:
+    """Look for aliased/linked group of files."""
+    if force_index:
+        db_path = LinkMapper.index_for(directory)
+        logger = quiet_logger if quiet else loud_logger
+        LinkMapper.index(db_path, logger)
+
+    mapper = LinkMapper(directory)
+    include = parse_link_types(link_types)
+    links = mapper.find_group(include=include, target=target)
+    print_links(links, output_format, quiet=quiet)
+
+
+def print_links(links: list[Link], format: OutputFormat, quiet: bool = False) -> None:
+    text = format_links(links, format, quiet=quiet)
+    if text:
+        print(text)
+
+
+def format_links(links: list[Link], format: OutputFormat, quiet: bool = False) -> str:
+    if format == OutputFormat.JSON:
+        text = format_links_as_json(links)
+    elif format == OutputFormat.YAML:
+        text = format_links_as_yaml(links)
     else:  # Text
-        if not links:
-            if not quiet:
-                print("No links found.")
-            return
-
-        if not quiet:
-            print(f"Found {len(links)} link set(s):")
-
-        print(format_links_as_text(links))
+        text = format_links_as_text(links, quiet=quiet)
+    return text
 
 
 def format_links_as_json(links: list[Link]) -> str:
@@ -226,8 +298,17 @@ def format_links_as_json(links: list[Link]) -> str:
     return json.dumps(json_data, indent=2)
 
 
-def format_links_as_text(links: list[Link]) -> str:
+def format_links_as_text(links: list[Link], quiet: bool = False) -> str:
+    if not links:
+        if quiet:
+            return ""
+        return "No links found."
+
     lines = []
+
+    if not quiet:
+        lines.append(f"Found {len(links)} link set(s):")
+
     for link in links:
         lines.append(f"[{link.link_type}] Key/Target: {link.key}")
         for p in link.paths:
