@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import re2  # Use google-re2 to protect against ReDOS attack
+
 __version__ = "0.7.1"
 DEFAULT_DB_NAME = ".lnmap_index.db"
 
@@ -280,7 +282,7 @@ class LinkMapper:
             resolved_db_path, hard_records, sym_records, alias_records
         )
 
-    def find_links(self, include: set[str]) -> list[Link]:
+    def find_links(self, include: set[str], target_re: str | None = None) -> list[Link]:
         """
         Retrieves link records from the database matching specified include types,
         using indexed LIKE queries to efficiently fetch only paths under self.directory.
@@ -311,36 +313,56 @@ class LinkMapper:
             sym_rows = []
             alias_rows = []
 
+            conn.create_function(
+                "REGEXP", 2, self.re2_regexp
+            )  # Enable Regexp searching in SQLite3
+
             if "hard" in include and "hard_links" in tables:
+                # TODO Can this be DRYed out?
+                where_clause, user_data = self._build_find_query(
+                    like_pattern=like_pattern,
+                    fields=["CAST(inode AS TEXT)"],
+                    res=[target_re],
+                )
                 cursor.execute(
-                    """
+                    f"""
                     SELECT inode, path FROM hard_links
-                    WHERE path LIKE ? ESCAPE '\\'
+                    WHERE {where_clause}
                     ORDER BY inode, path;
                     """,
-                    (like_pattern,),
+                    user_data,
                 )
                 hard_rows = cursor.fetchall()
 
             if "sym" in include and "sym_links" in tables:
+                where_clause, user_data = self._build_find_query(
+                    like_pattern=like_pattern,
+                    fields=["target"],
+                    res=[target_re],
+                )
                 cursor.execute(
-                    """
+                    f"""
                     SELECT target, path FROM sym_links
-                    WHERE path LIKE ? ESCAPE '\\'
+                    WHERE {where_clause}
                     ORDER BY target, path;
                     """,
-                    (like_pattern,),
+                    user_data,
                 )
                 sym_rows = cursor.fetchall()
 
             if "alias" in include and "alias_links" in tables:
+                where_clause, user_data = self._build_find_query(
+                    like_pattern=like_pattern,
+                    fields=["target"],
+                    res=[target_re],
+                )
                 cursor.execute(
-                    """
+                    f"""
                     SELECT target, path FROM alias_links
-                    WHERE path LIKE ? ESCAPE '\\'
+                    WHERE {where_clause}
                     ORDER BY target, path;
                     """,
-                    (like_pattern,),
+                    user_data,
                 )
                 alias_rows = cursor.fetchall()
 
@@ -373,3 +395,33 @@ class LinkMapper:
                     )
 
             return links
+
+    MAX_RE_LENGTH = 200  # Limit RE size to reduce risk of ReDOS attack
+
+    @staticmethod
+    def _build_find_query(
+        like_pattern: str, fields: str, res: str | None = None
+    ) -> str:
+        clauses = ["path LIKE ? ESCAPE '\\'"]
+        data = [like_pattern]
+        for field, re in zip(fields, res):
+            if re is not None:
+                if len(re) > LinkMapper.MAX_RE_LENGTH:
+                    raise ValueError(
+                        f"Search expression is too long (limit: {LinkMapper.MAX_RE_LENGTH} characters)."
+                    )
+                clauses.append(f"{field} REGEXP ?")
+                data.append(re)
+
+        joined_clauses = " AND ".join(clauses)
+        return [joined_clauses, data]
+
+    @staticmethod
+    def re2_regexp(pattern: str, string: str) -> bool:
+        """A ReDoS-safe regex evaluation function using Google RE2."""
+        try:
+            # re2 compiles and executes in linear time, preventing ReDoS
+            return bool(re2.search(pattern, string))
+        except re2.error:
+            # Handle invalid regex patterns entered by the user gracefully
+            return False
