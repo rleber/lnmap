@@ -302,8 +302,6 @@ class LinkMapper:
 
         self._check_find_res(res)
 
-        print(f"In find_links. res: {res!r}")
-
         dir_str = str(self.directory.resolve())
         if not dir_str.endswith(os.sep):
             dir_str += os.sep
@@ -400,11 +398,6 @@ class LinkMapper:
         )
         fields = self.TABLE_FIELDS[table]
         field_list = ", ".join(fields)
-        print("In _execute_query.")
-        print(f"    table: {table!r}")
-        print(f"    field_list: {field_list!r}")
-        print(f"    where_clause: {where_clause!r}")
-        print(f"    user_data: {user_data!r}")
         cursor.execute(
             f"""
             SELECT {field_list} FROM {table}
@@ -424,12 +417,7 @@ class LinkMapper:
         if res is None:
             res = {}
         for field, re in res.items():
-            print("In _build_find_query.")
-            print(f"    table: {table!r}")
-            print(f"    field: {field!r}")
-            print(f"    TABLE_FIELDS[{table!r}]: {LinkMapper.TABLE_FIELDS[table]!r}")
             if field in LinkMapper.TABLE_FIELDS[table]:
-                print("    Adding clause")
                 clauses.append(f"{LinkMapper.FIELD_MAPPING[field]} REGEXP ?")
                 data.append(re)
 
