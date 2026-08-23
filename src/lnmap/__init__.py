@@ -289,7 +289,9 @@ class LinkMapper:
             resolved_db_path, hard_records, sym_records, alias_records
         )
 
-    def find_links(self, include: set[str], res: str | None = None) -> list[Link]:
+    def find_links(
+        self, include: set[str], res: dict[str, str] | None = None
+    ) -> list[Link]:
         """
         Retrieves link records from the database matching specified include types,
         using indexed LIKE queries to efficiently fetch only paths under self.directory.
@@ -299,6 +301,8 @@ class LinkMapper:
             return []
 
         self._check_find_res(res)
+
+        print(f"In find_links. res: {res!r}")
 
         dir_str = str(self.directory.resolve())
         if not dir_str.endswith(os.sep):
@@ -322,53 +326,19 @@ class LinkMapper:
             )  # Enable Regexp searching in SQLite3
 
             if "hard" in include:
-                # TODO Can this be DRYed out?
-                where_clause, user_data = self._build_find_query(
-                    table="hard_links",
-                    like_pattern=like_pattern,
-                    res=res,
+                hard_rows = self._execute_query(
+                    cursor, "hard_links", like_pattern=like_pattern, res=res
                 )
-                cursor.execute(
-                    f"""
-                    SELECT inode, path FROM hard_links
-                    WHERE {where_clause}
-                    ORDER BY inode, path;
-                    """,
-                    user_data,
-                )
-                hard_rows = cursor.fetchall()
 
             if "sym" in include:
-                where_clause, user_data = self._build_find_query(
-                    table="sym_links",
-                    like_pattern=like_pattern,
-                    res=res,
+                sym_rows = self._execute_query(
+                    cursor, "sym_links", like_pattern=like_pattern, res=res
                 )
-                cursor.execute(
-                    f"""
-                    SELECT target, path FROM sym_links
-                    WHERE {where_clause}
-                    ORDER BY target, path;
-                    """,
-                    user_data,
-                )
-                sym_rows = cursor.fetchall()
 
             if "alias" in include:
-                where_clause, user_data = self._build_find_query(
-                    table="alias_links",
-                    like_pattern=like_pattern,
-                    res=res,
+                alias_rows = self._execute_query(
+                    cursor, "alias_links", like_pattern=like_pattern, res=res
                 )
-                cursor.execute(
-                    f"""
-                    SELECT target, path FROM alias_links
-                    WHERE {where_clause}
-                    ORDER BY target, path;
-                    """,
-                    user_data,
-                )
-                alias_rows = cursor.fetchall()
 
             links: list[Link] = []
 
@@ -420,6 +390,31 @@ class LinkMapper:
                     f"Search expression is too long (limit: {LinkMapper.MAX_RE_LENGTH} characters)."
                 )
 
+    def _execute_query(
+        self, cursor, table: str, like_pattern: str, res: dict[str, str] | None = None
+    ):
+        where_clause, user_data = self._build_find_query(
+            table=table,
+            like_pattern=like_pattern,
+            res=res,
+        )
+        fields = self.TABLE_FIELDS[table]
+        field_list = ", ".join(fields)
+        print("In _execute_query.")
+        print(f"    table: {table!r}")
+        print(f"    field_list: {field_list!r}")
+        print(f"    where_clause: {where_clause!r}")
+        print(f"    user_data: {user_data!r}")
+        cursor.execute(
+            f"""
+            SELECT {field_list} FROM {table}
+            WHERE {where_clause}
+            ORDER BY {field_list};
+            """,
+            user_data,
+        )
+        return cursor.fetchall()
+
     @staticmethod
     def _build_find_query(
         table: str, like_pattern: str, res: dict[str, str] | None = None
@@ -429,7 +424,12 @@ class LinkMapper:
         if res is None:
             res = {}
         for field, re in res.items():
+            print("In _build_find_query.")
+            print(f"    table: {table!r}")
+            print(f"    field: {field!r}")
+            print(f"    TABLE_FIELDS[{table!r}]: {LinkMapper.TABLE_FIELDS[table]!r}")
             if field in LinkMapper.TABLE_FIELDS[table]:
+                print("    Adding clause")
                 clauses.append(f"{LinkMapper.FIELD_MAPPING[field]} REGEXP ?")
                 data.append(re)
 

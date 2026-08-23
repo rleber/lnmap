@@ -131,6 +131,30 @@ def list_links(
             help="Select choices, or 'all' to select everything.",
         ),
     ] = None,
+    inode: Annotated[
+        str | None,
+        Option(
+            "--inode",
+            "-I",
+            help="Limit inodes using regular expression.",
+        ),
+    ] = None,
+    target: Annotated[
+        str | None,
+        Option(
+            "--target",
+            "-T",
+            help="Limit target paths using regular expression.",
+        ),
+    ] = None,
+    path: Annotated[
+        str | None,
+        Option(
+            "--path",
+            "-P",
+            help="Limit link paths using regular expression.",
+        ),
+    ] = None,
     force_index: Annotated[
         bool,
         Option(
@@ -164,7 +188,14 @@ def list_links(
 
     mapper = LinkMapper(directory)
     include = parse_link_types(link_types)
-    links = mapper.find_links(include=include)
+    res = {}
+    if target:
+        res["target"] = target
+    if inode:
+        res["inode"] = inode
+    if path:
+        res["path"] = path
+    links = mapper.find_links(include=include, res=res)
 
     if output_format == OutputFormat.JSON:
         print(format_links_as_json(links))
