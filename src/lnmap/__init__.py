@@ -445,6 +445,12 @@ class LinkMapper:
             # Handle invalid regex patterns entered by the user gracefully
             return False
 
+    # TODO A more sophisticated version of this would allow for the case where
+    #      multiple groups of soft linked files are aliased to different paths,
+    #      but ultimately refer to the same physical file because their target
+    #      paths are hard linked to the same inode. We might call these "cousins".
+    #      This is probably a rare edge case. As written right now, this code
+    #      won't find them.
     def find_group(self, include: set[str], target: Path) -> list[Link]:
         """
         Searches the database to find files that form an alias or link group,
