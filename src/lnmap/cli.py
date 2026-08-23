@@ -189,14 +189,84 @@ def list_links(
 
     mapper = LinkMapper(directory)
     include = parse_link_types(link_types)
-    res = {}
+    regexps = {}
     if target:
-        res["target"] = target
+        regexps["target"] = target
     if inode:
-        res["inode"] = inode
+        regexps["inode"] = inode
     if path:
-        res["path"] = path
-    links = mapper.find_links(include=include, res=res)
+        regexps["path"] = path
+    links = mapper.find_links(include=include, regexps=regexps)
+    print_links(links, output_format, quiet=quiet)
+
+
+@app.command(name="group")
+def list_groups(
+    target: Annotated[
+        Path,
+        Argument(
+            help="Path to search for alias/links around.",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            resolve_path=True,
+        ),
+    ],
+    directory: Annotated[
+        Path,
+        Argument(
+            help="Directory to search within.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+        ),
+    ] = Path("."),
+    link_types: Annotated[
+        list[ValidTypes] | None,
+        Option(
+            ...,
+            "--type",
+            "-t",
+            help="Select choices, or 'all' to select everything.",
+        ),
+    ] = None,
+    force_index: Annotated[
+        bool,
+        Option(
+            "-I",
+            "--index",
+            help="Force index update before searching.",
+        ),
+    ] = False,
+    quiet: Annotated[
+        bool,
+        Option(
+            "-q",
+            "--quiet",
+            help="Quiet mode.",
+        ),
+    ] = False,
+    output_format: Annotated[
+        OutputFormat,
+        Option(
+            "--format",
+            case_sensitive=False,
+            help="Output format.",
+        ),
+    ] = OutputFormat.TEXT,
+) -> None:
+    """Look for aliased/linked group of files."""
+    if force_index:
+        db_path = LinkMapper.index_for(directory)
+        logger = quiet_logger if quiet else loud_logger
+        LinkMapper.index(db_path, logger)
+
+    mapper = LinkMapper(directory)
+    include = parse_link_types(link_types)
+    links = mapper.find_group(include=include, target=target)
     print_links(links, output_format, quiet=quiet)
 
 

@@ -86,7 +86,10 @@ class LinkMapper:
 
     @staticmethod
     def index_for(directory: Path) -> Path:
-        """Finds the best existing index database using parent traversal, or defaults to <directory>/.lnmap_index.db."""
+        """Finds the best existing index database for a directory.
+        Scans up through the directory hierarchy from the given directory,
+        looking for index files. Returns the newest index. In case of ties,
+        it picks the index in the closest enclosing directory."""
         directory = directory.resolve()
         found_indexes = LinkMapper.indexes(directory)
 
@@ -100,7 +103,8 @@ class LinkMapper:
     def indexes(cls, directory: Path) -> list[LinkIndex]:
         """
         Searches for index database files starting from the specified directory
-        and traversing up through parent directories, returning a list of LinkIndex objects with last_modified in UTC.
+        and traversing up through parent directories, returning a list of LinkIndex
+        objects.
         """
         target_dir = directory.resolve()
         if not target_dir.is_dir():
@@ -213,8 +217,8 @@ class LinkMapper:
     @staticmethod
     def index(scan_directory: Path, logger: Callable) -> None:
         """
-        Scans the directory containing the given database file for all link types
-        and overwrites their information in the database.
+        Scans the directory containing the given database file for all links
+        of any type and overwrites their information in the database.
         """
         scan_directory = scan_directory.resolve()
         resolved_db_path = LinkMapper.db_for(scan_directory)
@@ -290,26 +294,19 @@ class LinkMapper:
         )
 
     def find_links(
-        self, include: set[str], res: dict[str, str] | None = None
+        self, include: set[str], regexps: dict[str, str] | None = None
     ) -> list[Link]:
         """
-        Retrieves link records from the database matching specified include types,
-        using indexed LIKE queries to efficiently fetch only paths under self.directory.
+        Retrieves information about matching links from the database.
+        Search is restricted to links within this directory, and may
+        be restricted to only certain kinds of links or only links matching
+        the link's inode, target, or path using regular expressions.
         """
 
-        if not include:
+        if not include:  # No kinds of links are allowed. Scram
             return []
 
-        self._check_find_res(res)
-
-        dir_str = str(self.directory.resolve())
-        if not dir_str.endswith(os.sep):
-            dir_str += os.sep
-
-        escaped_prefix = (
-            dir_str.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        )
-        like_pattern = f"{escaped_prefix}%"
+        self._check_find_res(regexps)
 
         with (
             sqlite3.connect(self.db_path) as conn,
@@ -324,18 +321,18 @@ class LinkMapper:
             )  # Enable Regexp searching in SQLite3
 
             if "hard" in include:
-                hard_rows = self._execute_query(
-                    cursor, "hard_links", like_pattern=like_pattern, res=res
+                hard_rows = self._execute_find_query(
+                    cursor, "hard_links", regexps=regexps
                 )
 
             if "sym" in include:
-                sym_rows = self._execute_query(
-                    cursor, "sym_links", like_pattern=like_pattern, res=res
+                sym_rows = self._execute_find_query(
+                    cursor, "sym_links", regexps=regexps
                 )
 
             if "alias" in include:
-                alias_rows = self._execute_query(
-                    cursor, "alias_links", like_pattern=like_pattern, res=res
+                alias_rows = self._execute_find_query(
+                    cursor, "alias_links", regexps=regexps
                 )
 
             links: list[Link] = []
@@ -368,7 +365,7 @@ class LinkMapper:
 
             return links
 
-    MAX_RE_LENGTH = 200  # Limit RE size to reduce risk of ReDOS attack
+    MAX_RE_LENGTH = 200  # Limit regexp size to reduce risk of ReDOS attack
     FIELD_MAPPING: typing.ClassVar = {
         "target": "target",
         "path": "path",
@@ -376,25 +373,25 @@ class LinkMapper:
     }
 
     @staticmethod
-    def _check_find_res(res: dict[str, str] | None) -> None:
-        """Validate searches: Correct label and regular expression not too long"""
-        if res is None:
+    def _check_find_res(regexps: dict[str, str] | None) -> None:
+        """Validate searches: Valid label and regular expression not too long"""
+        if regexps is None:
             return
-        for label, re in res.items():
+        for label, regexp in regexps.items():
             if label not in LinkMapper.FIELD_MAPPING:
                 raise ValueError(f"Invalid search target {label}")
-            if len(re) > LinkMapper.MAX_RE_LENGTH:
+            if len(regexp) > LinkMapper.MAX_RE_LENGTH:
                 raise ValueError(
                     f"Search expression is too long (limit: {LinkMapper.MAX_RE_LENGTH} characters)."
                 )
 
-    def _execute_query(
-        self, cursor, table: str, like_pattern: str, res: dict[str, str] | None = None
+    def _execute_find_query(
+        self, cursor, table: str, regexps: dict[str, str] | None = None
     ):
+        """Execute a database query for find_links, with appropriate WHERE clauses."""
         where_clause, user_data = self._build_find_query(
             table=table,
-            like_pattern=like_pattern,
-            res=res,
+            regexps=regexps,
         )
         fields = self.TABLE_FIELDS[table]
         field_list = ", ".join(fields)
@@ -408,28 +405,177 @@ class LinkMapper:
         )
         return cursor.fetchall()
 
-    @staticmethod
     def _build_find_query(
-        table: str, like_pattern: str, res: dict[str, str] | None = None
-    ) -> str:
-        clauses = ["path LIKE ? ESCAPE '\\'"]
-        data = [like_pattern]
-        if res is None:
-            res = {}
-        for field, re in res.items():
-            if field in LinkMapper.TABLE_FIELDS[table]:
-                clauses.append(f"{LinkMapper.FIELD_MAPPING[field]} REGEXP ?")
-                data.append(re)
+        self, table: str, regexps: dict[str, str] | None = None
+    ) -> list[str, list[str, ...]]:
+        """Build an appropriate WHERE clause for use in _execute_find_query"""
+        limit_clause, limit_pattern = self._build_directory_limit_query()
+        clauses = [limit_clause]
+        data = [limit_pattern]
+        if regexps is None:
+            regexps = {}
+        for field, regexp in regexps.items():
+            if field in self.TABLE_FIELDS[table]:
+                clauses.append(f"{self.FIELD_MAPPING[field]} REGEXP ?")
+                data.append(regexp)
 
         joined_clauses = " AND ".join(clauses)
         return [joined_clauses, data]
 
+    def _build_directory_limit_query(self) -> list[str, str]:
+        dir_str = str(self.directory.resolve())
+        if not dir_str.endswith(os.sep):
+            dir_str += os.sep
+
+        escaped_prefix = (
+            dir_str.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        return ["path LIKE ? ESCAPE '\\'", f"{escaped_prefix}%"]
+
     @staticmethod
     def re2_regexp(pattern: str, string: str) -> bool:
-        """A ReDoS-safe regex evaluation function using Google RE2."""
+        """A ReDoS-safe regex evaluation function using Google RE2,
+        for use in find_links to allow searching via regular expression
+        in SQLite3
+        """
         try:
             # re2 compiles and executes in linear time, preventing ReDoS
             return bool(re2.search(pattern, string))
         except re2.error:
             # Handle invalid regex patterns entered by the user gracefully
             return False
+
+    def find_group(self, include: set[str], target: Path) -> list[Link]:
+        """
+        Searches the database to find files that form an alias or link group,
+        i.e. that all are aliased, symlinked, or hard linked to the same file.
+        The members of the group must all be in the current directory. The
+        search may be restricted to only certain kinds of links.
+        """
+
+        if not include:  # No kinds of links are allowed. Scram
+            return []
+
+        with (
+            sqlite3.connect(self.db_path) as conn,
+            contextlib.closing(conn.cursor()) as cursor,
+        ):
+            hard_rows = []
+            sym_rows = []
+            alias_rows = []
+
+            if "hard" in include:
+                hard_rows = self._execute_group_query(cursor, "hard_links", target)
+
+            if "sym" in include:
+                sym_rows = self._execute_group_query(cursor, "sym_links", target)
+
+            if "alias" in include:
+                alias_rows = self._execute_group_query(cursor, "alias_links", target)
+
+            links: list[Link] = []
+
+            hard_map: dict[int, list[Path]] = defaultdict(list)
+            for inode, path_str in hard_rows:
+                hard_map[inode].append(Path(path_str))
+
+            for inode, paths in hard_map.items():
+                if len(paths) > 1:
+                    links.append(Link(link_type="hard", key=inode, paths=tuple(paths)))
+
+            sym_map: dict[Path, list[Path]] = defaultdict(list)
+            for target_str, path_str in sym_rows:
+                sym_map[Path(target_str)].append(Path(path_str))
+
+            for target_str, paths in sym_map.items():
+                if paths:
+                    links.append(
+                        Link(link_type="sym", key=target_str, paths=tuple(paths))
+                    )
+
+            alias_map: dict[Path, list[Path]] = defaultdict(list)
+            for target_str, path_str in alias_rows:
+                alias_map[Path(target_str)].append(Path(path_str))
+
+            for target_str, paths in alias_map.items():
+                if paths:
+                    links.append(
+                        Link(link_type="alias", key=target_str, paths=tuple(paths))
+                    )
+
+            return links
+
+    def _execute_group_query(self, cursor, table: str, target: Path):
+        """Execute a database query for find_group, with appropriate WHERE clauses."""
+        if table == "hard_links":
+            rows = self._execute_hard_link_group_query(cursor, target)
+        else:
+            rows = self._execute_soft_link_group_query(cursor, table, target)
+        return rows
+
+    def _execute_hard_link_group_query(self, cursor, p: Path):
+        limit_clause, limit_pattern = self._build_directory_limit_query()
+
+        # Find the matching inode (if any)
+        cursor.execute(
+            f"""
+            SELECT inode, path FROM hard_links
+            WHERE {limit_clause}
+              AND path = ?
+            ORDER BY inode, path;
+            """,
+            [limit_pattern, str(p)],
+        )
+        matching_rows = cursor.fetchall()
+        inodes = [inode for inode, _ in matching_rows]
+        inode_count = len(set(inodes))
+        if inode_count == 0:
+            return []
+        if inode_count > 1:  # This should never happen
+            raise RuntimeError(f"Path {p} has more than one inode.")
+        inode = inodes[0]
+        cursor.execute(
+            f"""
+            SELECT inode, path FROM hard_links
+            WHERE {limit_clause}
+              AND inode = ?
+            ORDER BY inode, path;
+            """,
+            [limit_pattern, inode],
+        )
+        return cursor.fetchall()
+
+    def _execute_soft_link_group_query(self, cursor, table: str, p: Path):
+        limit_clause, limit_pattern = self._build_directory_limit_query()
+
+        # Find the matching target (if any)
+        cursor.execute(
+            f"""
+            SELECT target, path FROM {table}
+            WHERE {limit_clause}
+              AND (
+                path = ?
+                OR target = ?
+              )
+            ORDER BY target, path;
+            """,
+            [limit_pattern, str(p), str(p)],
+        )
+        matching_rows = cursor.fetchall()
+        targets = [target for target, _ in matching_rows]
+        target_count = len(set(targets))
+        if target_count == 0:
+            return []
+        if target_count > 1:  # This should never happen
+            raise RuntimeError(f"Path {p} has more than matching alias or symlink.")
+        target = targets[0]
+        cursor.execute(
+            f"""
+            SELECT target, path FROM {table}
+            WHERE {limit_clause}
+              AND target = ?
+            ORDER BY target, path;
+            """,
+            [limit_pattern, target],
+        )
+        return cursor.fetchall()
