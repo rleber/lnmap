@@ -4,6 +4,7 @@ Catalog hard links, symlinks and aliases in a directory
 """
 
 import json
+import sys
 from enum import Enum
 from pathlib import Path
 from typing import Annotated
@@ -50,7 +51,7 @@ def parse_link_types(types: list[str] | None) -> set[str]:
 
 def loud_logger(count: int) -> None:
     if count % PROGRESS_INTERVAL == 0:
-        print(f"\rScanning: {count:,} items processed...", err=True, nl=False)
+        print(f"\rScanning: {count:,} items processed...", file=sys.stderr, end="")
 
 
 def quiet_logger(count: int) -> None:
