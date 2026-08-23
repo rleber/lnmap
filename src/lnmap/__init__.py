@@ -10,11 +10,14 @@ import datetime
 import os
 import sqlite3
 import sys
+import typing
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+import re2  # Use google-re2 to protect against ReDOS attack
 
 __version__ = "0.7.1"
 DEFAULT_DB_NAME = ".lnmap_index.db"
@@ -123,6 +126,12 @@ class LinkMapper:
             current = current.parent
 
         return found_indexes
+
+    TABLE_FIELDS: typing.ClassVar = {
+        "hard_links": ["inode", "path"],
+        "sym_links": ["target", "path"],
+        "alias_links": ["target", "path"],
+    }
 
     @staticmethod
     def _save_to_db(
@@ -280,7 +289,9 @@ class LinkMapper:
             resolved_db_path, hard_records, sym_records, alias_records
         )
 
-    def find_links(self, include: set[str]) -> list[Link]:
+    def find_links(
+        self, include: set[str], res: dict[str, str] | None = None
+    ) -> list[Link]:
         """
         Retrieves link records from the database matching specified include types,
         using indexed LIKE queries to efficiently fetch only paths under self.directory.
@@ -288,6 +299,10 @@ class LinkMapper:
 
         if not include:
             return []
+
+        self._check_find_res(res)
+
+        print(f"In find_links. res: {res!r}")
 
         dir_str = str(self.directory.resolve())
         if not dir_str.endswith(os.sep):
@@ -302,47 +317,28 @@ class LinkMapper:
             sqlite3.connect(self.db_path) as conn,
             contextlib.closing(conn.cursor()) as cursor,
         ):
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('hard_links', 'sym_links', 'alias_links');"
-            )
-            tables = {row[0] for row in cursor.fetchall()}
-
             hard_rows = []
             sym_rows = []
             alias_rows = []
 
-            if "hard" in include and "hard_links" in tables:
-                cursor.execute(
-                    """
-                    SELECT inode, path FROM hard_links
-                    WHERE path LIKE ? ESCAPE '\\'
-                    ORDER BY inode, path;
-                    """,
-                    (like_pattern,),
-                )
-                hard_rows = cursor.fetchall()
+            conn.create_function(
+                "REGEXP", 2, self.re2_regexp
+            )  # Enable Regexp searching in SQLite3
 
-            if "sym" in include and "sym_links" in tables:
-                cursor.execute(
-                    """
-                    SELECT target, path FROM sym_links
-                    WHERE path LIKE ? ESCAPE '\\'
-                    ORDER BY target, path;
-                    """,
-                    (like_pattern,),
+            if "hard" in include:
+                hard_rows = self._execute_query(
+                    cursor, "hard_links", like_pattern=like_pattern, res=res
                 )
-                sym_rows = cursor.fetchall()
 
-            if "alias" in include and "alias_links" in tables:
-                cursor.execute(
-                    """
-                    SELECT target, path FROM alias_links
-                    WHERE path LIKE ? ESCAPE '\\'
-                    ORDER BY target, path;
-                    """,
-                    (like_pattern,),
+            if "sym" in include:
+                sym_rows = self._execute_query(
+                    cursor, "sym_links", like_pattern=like_pattern, res=res
                 )
-                alias_rows = cursor.fetchall()
+
+            if "alias" in include:
+                alias_rows = self._execute_query(
+                    cursor, "alias_links", like_pattern=like_pattern, res=res
+                )
 
             links: list[Link] = []
 
@@ -373,3 +369,79 @@ class LinkMapper:
                     )
 
             return links
+
+    MAX_RE_LENGTH = 200  # Limit RE size to reduce risk of ReDOS attack
+    FIELD_MAPPING: typing.ClassVar = {
+        "target": "target",
+        "path": "path",
+        "inode": "CAST(inode AS TEXT)",
+    }
+
+    @staticmethod
+    def _check_find_res(res: dict[str, str] | None) -> None:
+        """Validate searches: Correct label and regular expression not too long"""
+        if res is None:
+            return
+        for label, re in res.items():
+            if label not in LinkMapper.FIELD_MAPPING:
+                raise ValueError(f"Invalid search target {label}")
+            if len(re) > LinkMapper.MAX_RE_LENGTH:
+                raise ValueError(
+                    f"Search expression is too long (limit: {LinkMapper.MAX_RE_LENGTH} characters)."
+                )
+
+    def _execute_query(
+        self, cursor, table: str, like_pattern: str, res: dict[str, str] | None = None
+    ):
+        where_clause, user_data = self._build_find_query(
+            table=table,
+            like_pattern=like_pattern,
+            res=res,
+        )
+        fields = self.TABLE_FIELDS[table]
+        field_list = ", ".join(fields)
+        print("In _execute_query.")
+        print(f"    table: {table!r}")
+        print(f"    field_list: {field_list!r}")
+        print(f"    where_clause: {where_clause!r}")
+        print(f"    user_data: {user_data!r}")
+        cursor.execute(
+            f"""
+            SELECT {field_list} FROM {table}
+            WHERE {where_clause}
+            ORDER BY {field_list};
+            """,
+            user_data,
+        )
+        return cursor.fetchall()
+
+    @staticmethod
+    def _build_find_query(
+        table: str, like_pattern: str, res: dict[str, str] | None = None
+    ) -> str:
+        clauses = ["path LIKE ? ESCAPE '\\'"]
+        data = [like_pattern]
+        if res is None:
+            res = {}
+        for field, re in res.items():
+            print("In _build_find_query.")
+            print(f"    table: {table!r}")
+            print(f"    field: {field!r}")
+            print(f"    TABLE_FIELDS[{table!r}]: {LinkMapper.TABLE_FIELDS[table]!r}")
+            if field in LinkMapper.TABLE_FIELDS[table]:
+                print("    Adding clause")
+                clauses.append(f"{LinkMapper.FIELD_MAPPING[field]} REGEXP ?")
+                data.append(re)
+
+        joined_clauses = " AND ".join(clauses)
+        return [joined_clauses, data]
+
+    @staticmethod
+    def re2_regexp(pattern: str, string: str) -> bool:
+        """A ReDoS-safe regex evaluation function using Google RE2."""
+        try:
+            # re2 compiles and executes in linear time, preventing ReDoS
+            return bool(re2.search(pattern, string))
+        except re2.error:
+            # Handle invalid regex patterns entered by the user gracefully
+            return False
