@@ -19,7 +19,7 @@ from typing import Literal
 
 import re2  # Use google-re2 to protect against ReDOS attack
 
-__version__ = "0.7.1"
+__version__ = "1.0.0"
 DEFAULT_DB_NAME = ".lnmap_index.db"
 
 UpdateMode = Iterable[str]
