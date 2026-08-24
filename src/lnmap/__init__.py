@@ -335,35 +335,37 @@ class LinkMapper:
                     cursor, "alias_links", regexps=regexps
                 )
 
-            links: list[Link] = []
+        return self.consolidate_links(hard_rows, sym_rows, alias_rows)
 
-            hard_map: dict[int, list[Path]] = defaultdict(list)
-            for inode, path_str in hard_rows:
-                hard_map[inode].append(Path(path_str))
+    def consolidate_links(self, hard_rows, sym_rows, alias_rows) -> list[Link]:
+        links: list[Link] = []
 
-            for inode, paths in hard_map.items():
-                if len(paths) > 1:
-                    links.append(Link(link_type="hard", key=inode, paths=tuple(paths)))
+        hard_map: dict[int, list[Path]] = defaultdict(list)
+        for inode, path_str in hard_rows:
+            hard_map[inode].append(Path(path_str))
 
-            sym_map: dict[Path, list[Path]] = defaultdict(list)
-            for target_str, path_str in sym_rows:
-                sym_map[Path(target_str)].append(Path(path_str))
+        for inode, paths in hard_map.items():
+            if len(paths) > 1:
+                # Hard links outside the current directory are not included
+                links.append(Link(link_type="hard", key=inode, paths=tuple(paths)))
 
-            for target, paths in sym_map.items():
-                if paths:
-                    links.append(Link(link_type="sym", key=target, paths=tuple(paths)))
+        sym_map: dict[Path, list[Path]] = defaultdict(list)
+        for target_str, path_str in sym_rows:
+            sym_map[Path(target_str)].append(Path(path_str))
 
-            alias_map: dict[Path, list[Path]] = defaultdict(list)
-            for target_str, path_str in alias_rows:
-                alias_map[Path(target_str)].append(Path(path_str))
+        for target, paths in sym_map.items():
+            if paths:
+                links.append(Link(link_type="sym", key=target, paths=tuple(paths)))
 
-            for target, paths in alias_map.items():
-                if paths:
-                    links.append(
-                        Link(link_type="alias", key=target, paths=tuple(paths))
-                    )
+        alias_map: dict[Path, list[Path]] = defaultdict(list)
+        for target_str, path_str in alias_rows:
+            alias_map[Path(target_str)].append(Path(path_str))
 
-            return links
+        for target, paths in alias_map.items():
+            if paths:
+                links.append(Link(link_type="alias", key=target, paths=tuple(paths)))
+
+        return links
 
     MAX_RE_LENGTH = 200  # Limit regexp size to reduce risk of ReDOS attack
     FIELD_MAPPING: typing.ClassVar = {
@@ -479,37 +481,7 @@ class LinkMapper:
             if "alias" in include:
                 alias_rows = self._execute_group_query(cursor, "alias_links", target)
 
-            links: list[Link] = []
-
-            hard_map: dict[int, list[Path]] = defaultdict(list)
-            for inode, path_str in hard_rows:
-                hard_map[inode].append(Path(path_str))
-
-            for inode, paths in hard_map.items():
-                if len(paths) > 1:
-                    links.append(Link(link_type="hard", key=inode, paths=tuple(paths)))
-
-            sym_map: dict[Path, list[Path]] = defaultdict(list)
-            for target_str, path_str in sym_rows:
-                sym_map[Path(target_str)].append(Path(path_str))
-
-            for target_str, paths in sym_map.items():
-                if paths:
-                    links.append(
-                        Link(link_type="sym", key=target_str, paths=tuple(paths))
-                    )
-
-            alias_map: dict[Path, list[Path]] = defaultdict(list)
-            for target_str, path_str in alias_rows:
-                alias_map[Path(target_str)].append(Path(path_str))
-
-            for target_str, paths in alias_map.items():
-                if paths:
-                    links.append(
-                        Link(link_type="alias", key=target_str, paths=tuple(paths))
-                    )
-
-            return links
+        return self.consolidate_links(hard_rows, sym_rows, alias_rows)
 
     def _execute_group_query(self, cursor, table: str, target: Path):
         """Execute a database query for find_group, with appropriate WHERE clauses."""
