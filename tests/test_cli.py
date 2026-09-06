@@ -1,4 +1,5 @@
 import sqlite3
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,13 +9,13 @@ from conftest import make_hardlink
 from typer.testing import CliRunner
 
 from lnmap import Link
-from lnmap.cli import (
-    PROGRESS_INTERVAL,
-    ValidTypes,
-    app,
-    format_links_as_yaml,
-    loud_logger,
-    parse_link_types,
+from lnmap.cli import app
+from lnmap.support.link_types import ValidTypes, parse_link_types
+from lnmap.support.output import format_links_as_yaml
+from lnmap.support.progress import PROGRESS_INTERVAL, loud_logger
+
+darwin_only = pytest.mark.skipif(
+    sys.platform != "darwin", reason="macOS-specific behavior"
 )
 
 
@@ -29,15 +30,55 @@ def sample_links() -> list[Link]:
     return [
         Link(
             link_type="hard",
-            key="123456",
+            inode=123456,
             paths=["/tmp/a.txt", "/tmp/b.txt"],
         ),
         Link(
             link_type="sym",
-            key="/tmp/target.txt",
+            target=Path("/tmp/target.txt"),
             paths=["/tmp/link.txt"],
         ),
     ]
+
+
+@pytest.fixture
+def mock_db_dir(tmp_path: Path) -> Path:
+    """Creates a temporary directory with an initialized SQLite db matching lnmap schema."""
+    base_dir = tmp_path / "app"
+    base_dir.mkdir()
+    db_path = base_dir / ".lnmap_index.db"
+
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "CREATE TABLE hard_links (inode INTEGER NOT NULL, path TEXT NOT NULL);"
+        )
+        cursor.execute(
+            "CREATE TABLE sym_links (target TEXT NOT NULL, path TEXT NOT NULL);"
+        )
+        cursor.execute(
+            "CREATE TABLE alias_links (target TEXT NOT NULL, path TEXT NOT NULL);"
+        )
+
+        cursor.executemany(
+            "INSERT INTO hard_links VALUES (?, ?);",
+            [
+                (1001, str(base_dir / "hard1.txt")),
+                (1001, str(base_dir / "hard2.txt")),
+            ],
+        )
+        cursor.executemany(
+            "INSERT INTO sym_links VALUES (?, ?);",
+            [
+                (str(base_dir / "targets" / "doc.pdf"), str(base_dir / "sym1.pdf")),
+            ],
+        )
+        conn.commit()
+
+    return base_dir
+
+
+# --- Tests for support functions (formatting, parsing, logging) ---
 
 
 def test_format_links_as_yaml(runner: CliRunner, sample_links: list[Link]) -> None:
@@ -56,6 +97,31 @@ def test_format_links_as_yaml(runner: CliRunner, sample_links: list[Link]) -> No
     assert parsed[1]["type"] == "sym"
 
 
+def test_parse_link_types_defaults_to_all_when_none() -> None:
+    assert parse_link_types(None) == {"hard", "sym", "alias"}
+
+
+def test_parse_link_types_all_choice_expands_to_all_types() -> None:
+    assert parse_link_types([ValidTypes.ALL]) == {"hard", "sym", "alias"}
+
+
+def test_parse_link_types_explicit_subset() -> None:
+    result = parse_link_types([ValidTypes.HARDLINK, ValidTypes.SYMLINK])
+    assert result == {"hard", "sym"}
+
+
+def test_loud_logger_prints_only_on_progress_interval(capsys) -> None:
+    loud_logger(1)
+    loud_logger(PROGRESS_INTERVAL - 1)
+    assert capsys.readouterr().err == ""
+
+    loud_logger(PROGRESS_INTERVAL)
+    assert f"{PROGRESS_INTERVAL:,}" in capsys.readouterr().err
+
+
+# --- Tests for global CLI behavior ---
+
+
 def test_cli_help(
     runner: CliRunner,
 ) -> None:
@@ -72,6 +138,9 @@ def test_cli_version(
     assert "lnmap" in result.stdout
 
 
+# --- Tests for the `index` command ---
+
+
 def test_cli_index_and_list_text(runner: CliRunner, tmp_path: Path) -> None:
     file1 = tmp_path / "a.txt"
     file1.write_text("data")
@@ -84,6 +153,45 @@ def test_cli_index_and_list_text(runner: CliRunner, tmp_path: Path) -> None:
     list_result = runner.invoke(app, ["list", str(tmp_path)])
     assert list_result.exit_code == 0
     assert "[hard]" in list_result.stdout
+
+
+def test_cli_index_verbose(runner: CliRunner, tmp_path: Path) -> None:
+    file1 = tmp_path / "a.txt"
+    file1.write_text("data")
+    file2 = tmp_path / "b.txt"
+    make_hardlink(file1, file2)
+
+    result = runner.invoke(app, ["index", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "Updated index" in result.stdout
+
+
+def test_cli_index_quiet(runner: CliRunner, tmp_path: Path) -> None:
+    file1 = tmp_path / "a.txt"
+    file1.write_text("data")
+    file2 = tmp_path / "b.txt"
+    make_hardlink(file1, file2)
+
+    result = runner.invoke(app, ["index", "--quiet", str(tmp_path)])
+    assert result.exit_code == 0
+    assert result.stdout == ""
+
+
+@darwin_only
+def test_cli_index_creates_config_file_if_missing(
+    runner: CliRunner, tmp_path: Path, isolated_lnmap_config: Path
+) -> None:
+    """Running `index` must create the lnmap config file as a side effect,
+    even though the user never ran `init` explicitly."""
+    assert not isolated_lnmap_config.exists()
+
+    result = runner.invoke(app, ["index", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert isolated_lnmap_config.exists()
+
+
+# --- Tests for the `list` command ---
 
 
 def test_cli_list_json_format(runner: CliRunner, tmp_path: Path) -> None:
@@ -112,80 +220,6 @@ def test_cli_list_yaml_format(runner: CliRunner, tmp_path: Path) -> None:
     list_result = runner.invoke(app, ["list", "--format", "yaml", str(tmp_path)])
     assert list_result.exit_code == 0
     assert "type: hard" in list_result.stdout
-
-
-def test_loud_logger_prints_only_on_progress_interval(capsys) -> None:
-    loud_logger(1)
-    loud_logger(PROGRESS_INTERVAL - 1)
-    assert capsys.readouterr().err == ""
-
-    loud_logger(PROGRESS_INTERVAL)
-    assert f"{PROGRESS_INTERVAL:,}" in capsys.readouterr().err
-
-
-def test_cli_indexes_subcommand(runner: CliRunner, tmp_path: Path) -> None:
-    root = tmp_path / "root"
-    sub = root / "sub"
-    sub.mkdir(parents=True)
-
-    db_root = root / ".lnmap_index.db"
-    db_root.touch()
-
-    result = runner.invoke(app, ["indexes", str(sub)])
-    assert result.exit_code == 0
-    assert str(db_root) in result.stdout
-
-
-def test_cli_index_verbose(runner: CliRunner, tmp_path: Path) -> None:
-    file1 = tmp_path / "a.txt"
-    file1.write_text("data")
-    file2 = tmp_path / "b.txt"
-    make_hardlink(file1, file2)
-
-    result = runner.invoke(app, ["index", str(tmp_path)])
-    assert result.exit_code == 0
-    assert "Updated index" in result.stdout
-
-
-def test_cli_index_quiet(runner: CliRunner, tmp_path: Path) -> None:
-    file1 = tmp_path / "a.txt"
-    file1.write_text("data")
-    file2 = tmp_path / "b.txt"
-    make_hardlink(file1, file2)
-
-    result = runner.invoke(app, ["index", "--quiet", str(tmp_path)])
-    assert result.exit_code == 0
-    assert result.stdout == ""
-
-
-def test_cli_multi_index(runner: CliRunner, tmp_path: Path) -> None:
-    file1 = tmp_path / "a.txt"
-    file1.write_text("data")
-    file2 = tmp_path / "b.txt"
-    make_hardlink(file1, file2)
-
-    index_result = runner.invoke(app, ["index", str(tmp_path)])
-    assert index_result.exit_code == 0
-
-    list_result = runner.invoke(app, ["list", str(tmp_path)])
-    assert list_result.exit_code == 0
-    assert "[hard]" in list_result.stdout
-
-
-def test_cli_list_text_no_links_found(runner: CliRunner, tmp_path: Path) -> None:
-    runner.invoke(app, ["index", str(tmp_path)])
-    result = runner.invoke(app, ["list", str(tmp_path)])
-    assert result.exit_code == 0
-    assert "No links found." in result.stdout
-
-
-def test_cli_list_text_quiet_no_links_found_prints_nothing(
-    runner: CliRunner, tmp_path: Path
-) -> None:
-    runner.invoke(app, ["index", str(tmp_path)])
-    result = runner.invoke(app, ["list", "--quiet", str(tmp_path)])
-    assert result.exit_code == 0
-    assert result.stdout == ""
 
 
 def test_cli_list_type_filter(runner: CliRunner, tmp_path: Path) -> None:
@@ -240,136 +274,6 @@ def test_cli_list_force_index_short_flag(runner: CliRunner, tmp_path: Path) -> N
     assert "[hard]" in result.stdout
 
 
-def test_cli_group_subcommand(runner: CliRunner, tmp_path: Path) -> None:
-    target = tmp_path / "target.txt"
-    target.write_text("data")
-    sym1 = tmp_path / "sym1.txt"
-    sym2 = tmp_path / "sym2.txt"
-    try:
-        sym1.symlink_to(target)
-        sym2.symlink_to(target)
-    except (OSError, NotImplementedError):
-        pytest.skip("Symlinks not supported on this OS")
-
-    index_result = runner.invoke(app, ["index", str(tmp_path)])
-    assert index_result.exit_code == 0
-
-    group_result = runner.invoke(app, ["group", str(sym1), str(tmp_path)])
-
-    assert group_result.exit_code == 0
-    assert "[sym]" in group_result.stdout
-    assert str(sym2) in group_result.stdout
-
-
-def test_cli_group_subcommand_force_index(runner: CliRunner, tmp_path: Path) -> None:
-    """group --index forces a reindex before searching, even with no prior index."""
-    target = tmp_path / "target.txt"
-    target.write_text("data")
-    sym1 = tmp_path / "sym1.txt"
-    sym2 = tmp_path / "sym2.txt"
-    try:
-        sym1.symlink_to(target)
-        sym2.symlink_to(target)
-    except (OSError, NotImplementedError):
-        pytest.skip("Symlinks not supported on this OS")
-
-    result = runner.invoke(app, ["group", "--index", str(sym1), str(tmp_path)])
-
-    assert result.exit_code == 0
-    assert str(sym2) in result.stdout
-
-
-def test_cli_indexes_subcommand_no_indexes_found(
-    runner: CliRunner, tmp_path: Path
-) -> None:
-    result = runner.invoke(app, ["indexes", str(tmp_path)])
-    assert result.exit_code == 0
-    assert "No index files found." in result.stdout
-
-
-def test_cli_indexes_subcommand_multiple_indexes(
-    runner: CliRunner, tmp_path: Path
-) -> None:
-    root = tmp_path / "root"
-    mid = root / "mid"
-    sub = mid / "sub"
-    sub.mkdir(parents=True)
-
-    root_db = root / ".lnmap_index.db"
-    mid_db = mid / ".lnmap_index.db"
-    root_db.touch()
-    mid_db.touch()
-
-    result = runner.invoke(app, ["indexes", str(sub)])
-
-    assert result.exit_code == 0
-    assert str(root_db) in result.stdout
-    assert str(mid_db) in result.stdout
-
-
-def test_parse_link_types_defaults_to_all_when_none() -> None:
-    assert parse_link_types(None) == {"hard", "sym", "alias"}
-
-
-def test_parse_link_types_all_choice_expands_to_all_types() -> None:
-    assert parse_link_types([ValidTypes.ALL]) == {"hard", "sym", "alias"}
-
-
-def test_parse_link_types_explicit_subset() -> None:
-    result = parse_link_types([ValidTypes.HARDLINK, ValidTypes.SYMLINK])
-    assert result == {"hard", "sym"}
-
-
-def test_cli_list_inode_short_flag(runner: CliRunner, mock_db_dir: Path) -> None:
-    """-I is the short flag for --inode, now that force-reindex uses -F."""
-    with patch("lnmap.LinkMapper.find_links") as mock_find_links:
-        mock_find_links.return_value = []
-
-        result = runner.invoke(app, ["list", str(mock_db_dir), "-I", r"^100\d$"])
-
-        assert result.exit_code == 0
-        mock_find_links.assert_called_once()
-        _, kwargs = mock_find_links.call_args
-        assert kwargs.get("regexps") == {"inode": r"^100\d$"}
-
-
-@pytest.fixture
-def mock_db_dir(tmp_path: Path) -> Path:
-    """Creates a temporary directory with an initialized SQLite db matching lnmap schema."""
-    base_dir = tmp_path / "app"
-    base_dir.mkdir()
-    db_path = base_dir / ".lnmap_index.db"
-
-    with sqlite3.connect(db_path) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "CREATE TABLE hard_links (inode INTEGER NOT NULL, path TEXT NOT NULL);"
-        )
-        cursor.execute(
-            "CREATE TABLE sym_links (target TEXT NOT NULL, path TEXT NOT NULL);"
-        )
-        cursor.execute(
-            "CREATE TABLE alias_links (target TEXT NOT NULL, path TEXT NOT NULL);"
-        )
-
-        cursor.executemany(
-            "INSERT INTO hard_links VALUES (?, ?);",
-            [
-                (1001, str(base_dir / "hard1.txt")),
-                (1001, str(base_dir / "hard2.txt")),
-            ],
-        )
-        cursor.executemany(
-            "INSERT INTO sym_links VALUES (?, ?);",
-            [
-                (str(base_dir / "targets" / "doc.pdf"), str(base_dir / "sym1.pdf")),
-            ],
-        )
-        conn.commit()
-
-    return base_dir
-
-
 def test_cli_list_path_regex_option(runner: CliRunner, mock_db_dir: Path) -> None:
     """Verify --path / -P passes regex dict key 'path' to LinkMapper.find_links."""
     with patch("lnmap.LinkMapper.find_links") as mock_find_links:
@@ -409,6 +313,19 @@ def test_cli_list_inode_regex_option(runner: CliRunner, mock_db_dir: Path) -> No
         assert kwargs.get("regexps") == {"inode": r"^100\d$"}
 
 
+def test_cli_list_inode_short_flag(runner: CliRunner, mock_db_dir: Path) -> None:
+    """-I is the short flag for --inode, now that force-reindex uses -F."""
+    with patch("lnmap.LinkMapper.find_links") as mock_find_links:
+        mock_find_links.return_value = []
+
+        result = runner.invoke(app, ["list", str(mock_db_dir), "-I", r"^100\d$"])
+
+        assert result.exit_code == 0
+        mock_find_links.assert_called_once()
+        _, kwargs = mock_find_links.call_args
+        assert kwargs.get("regexps") == {"inode": r"^100\d$"}
+
+
 def test_cli_list_combined_regex_options(runner: CliRunner, mock_db_dir: Path) -> None:
     """Verify multi-option regex evaluation mapping (inode, target, path)."""
     with patch("lnmap.LinkMapper.find_links") as mock_find_links:
@@ -438,6 +355,22 @@ def test_cli_list_combined_regex_options(runner: CliRunner, mock_db_dir: Path) -
         }
 
 
+def test_cli_list_text_no_links_found(runner: CliRunner, tmp_path: Path) -> None:
+    runner.invoke(app, ["index", str(tmp_path)])
+    result = runner.invoke(app, ["list", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "No links found." in result.stdout
+
+
+def test_cli_list_text_quiet_no_links_found_prints_nothing(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    runner.invoke(app, ["index", str(tmp_path)])
+    result = runner.invoke(app, ["list", "--quiet", str(tmp_path)])
+    assert result.exit_code == 0
+    assert result.stdout == ""
+
+
 def test_cli_list_regex_exception_handling(
     runner: CliRunner, mock_db_dir: Path
 ) -> None:
@@ -449,3 +382,122 @@ def test_cli_list_regex_exception_handling(
 
         assert result.exit_code != 0
         assert isinstance(result.exception, ValueError)
+
+
+# --- Tests for the `group` command ---
+
+
+def test_cli_group_subcommand(runner: CliRunner, tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("data")
+    sym1 = tmp_path / "sym1.txt"
+    sym2 = tmp_path / "sym2.txt"
+    try:
+        sym1.symlink_to(target)
+        sym2.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlinks not supported on this OS")
+
+    index_result = runner.invoke(app, ["index", str(tmp_path)])
+    assert index_result.exit_code == 0
+
+    group_result = runner.invoke(app, ["group", str(sym1), str(tmp_path)])
+
+    assert group_result.exit_code == 0
+    assert "[sym]" in group_result.stdout
+    assert str(sym2) in group_result.stdout
+
+
+def test_cli_group_subcommand_force_index(runner: CliRunner, tmp_path: Path) -> None:
+    """group --index forces a reindex before searching, even with no prior index."""
+    target = tmp_path / "target.txt"
+    target.write_text("data")
+    sym1 = tmp_path / "sym1.txt"
+    sym2 = tmp_path / "sym2.txt"
+    try:
+        sym1.symlink_to(target)
+        sym2.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlinks not supported on this OS")
+
+    result = runner.invoke(app, ["group", "--index", str(sym1), str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert str(sym2) in result.stdout
+
+
+# --- Tests for the `indexes` command ---
+
+
+def test_cli_indexes_subcommand(runner: CliRunner, tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    sub = root / "sub"
+    sub.mkdir(parents=True)
+
+    db_root = root / ".lnmap_index.db"
+    db_root.touch()
+
+    result = runner.invoke(app, ["indexes", str(sub)])
+    assert result.exit_code == 0
+    assert str(db_root) in result.stdout
+
+
+def test_cli_indexes_subcommand_multiple_indexes(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    root = tmp_path / "root"
+    mid = root / "mid"
+    sub = mid / "sub"
+    sub.mkdir(parents=True)
+
+    root_db = root / ".lnmap_index.db"
+    mid_db = mid / ".lnmap_index.db"
+    root_db.touch()
+    mid_db.touch()
+
+    result = runner.invoke(app, ["indexes", str(sub)])
+
+    assert result.exit_code == 0
+    assert str(root_db) in result.stdout
+    assert str(mid_db) in result.stdout
+
+
+def test_cli_indexes_subcommand_no_indexes_found(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    result = runner.invoke(app, ["indexes", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "No index files found." in result.stdout
+
+
+# --- Tests for the `init` command ---
+
+
+def test_cli_init_creates_config_file(
+    runner: CliRunner, isolated_lnmap_config: Path
+) -> None:
+    assert not isolated_lnmap_config.exists()
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    assert isolated_lnmap_config.exists()
+    assert "Created config file" in result.stdout
+
+
+def test_cli_init_does_not_overwrite_existing_config(
+    runner: CliRunner, isolated_lnmap_config: Path
+) -> None:
+    """Running init twice must not clobber a config the user already edited."""
+    first = runner.invoke(app, ["init"])
+    assert first.exit_code == 0
+
+    isolated_lnmap_config.write_text(yaml.dump({"protected_dirs": ["Custom/Dir"]}))
+
+    second = runner.invoke(app, ["init"])
+
+    assert second.exit_code == 0
+    assert "already exists" in second.stdout
+    assert yaml.safe_load(isolated_lnmap_config.read_text()) == {
+        "protected_dirs": ["Custom/Dir"]
+    }
