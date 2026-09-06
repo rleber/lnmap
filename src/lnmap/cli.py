@@ -159,7 +159,7 @@ def list_links(
     force_index: Annotated[
         bool,
         Option(
-            "-I",
+            "-F",
             "--index",
             help="Force index update before searching.",
         ),
@@ -183,9 +183,8 @@ def list_links(
 ) -> None:
     """Query indexed links."""
     if force_index:
-        db_path = LinkMapper.index_for(directory)
         logger = quiet_logger if quiet else loud_logger
-        LinkMapper.index(db_path, logger)
+        LinkMapper.index(directory, logger)
 
     mapper = LinkMapper(directory)
     include = parse_link_types(link_types)
@@ -236,7 +235,7 @@ def list_groups(
     force_index: Annotated[
         bool,
         Option(
-            "-I",
+            "-F",
             "--index",
             help="Force index update before searching.",
         ),
@@ -260,9 +259,8 @@ def list_groups(
 ) -> None:
     """Look for aliased/linked group of files."""
     if force_index:
-        db_path = LinkMapper.index_for(directory)
         logger = quiet_logger if quiet else loud_logger
-        LinkMapper.index(db_path, logger)
+        LinkMapper.index(directory, logger)
 
     mapper = LinkMapper(directory)
     include = parse_link_types(link_types)

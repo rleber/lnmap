@@ -1,14 +1,21 @@
-import os
 import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 import yaml
+from conftest import make_hardlink
 from typer.testing import CliRunner
 
 from lnmap import Link
-from lnmap.cli import app, format_links_as_yaml
+from lnmap.cli import (
+    PROGRESS_INTERVAL,
+    ValidTypes,
+    app,
+    format_links_as_yaml,
+    loud_logger,
+    parse_link_types,
+)
 
 
 @pytest.fixture
@@ -69,10 +76,7 @@ def test_cli_index_and_list_text(runner: CliRunner, tmp_path: Path) -> None:
     file1 = tmp_path / "a.txt"
     file1.write_text("data")
     file2 = tmp_path / "b.txt"
-    try:
-        os.link(file1, file2)
-    except OSError:
-        pytest.skip("Hard links not supported")
+    make_hardlink(file1, file2)
 
     index_result = runner.invoke(app, ["index", str(tmp_path)])
     assert index_result.exit_code == 0
@@ -86,10 +90,7 @@ def test_cli_list_json_format(runner: CliRunner, tmp_path: Path) -> None:
     file1 = tmp_path / "a.txt"
     file1.write_text("data")
     file2 = tmp_path / "b.txt"
-    try:
-        os.link(file1, file2)
-    except OSError:
-        pytest.skip("Hard links not supported")
+    make_hardlink(file1, file2)
 
     index_result = runner.invoke(app, ["index", str(tmp_path)])
     assert index_result.exit_code == 0
@@ -97,6 +98,29 @@ def test_cli_list_json_format(runner: CliRunner, tmp_path: Path) -> None:
     list_result = runner.invoke(app, ["list", "--format", "json", str(tmp_path)])
     assert list_result.exit_code == 0
     assert '"type": "hard"' in list_result.stdout
+
+
+def test_cli_list_yaml_format(runner: CliRunner, tmp_path: Path) -> None:
+    file1 = tmp_path / "a.txt"
+    file1.write_text("data")
+    file2 = tmp_path / "b.txt"
+    make_hardlink(file1, file2)
+
+    index_result = runner.invoke(app, ["index", str(tmp_path)])
+    assert index_result.exit_code == 0
+
+    list_result = runner.invoke(app, ["list", "--format", "yaml", str(tmp_path)])
+    assert list_result.exit_code == 0
+    assert "type: hard" in list_result.stdout
+
+
+def test_loud_logger_prints_only_on_progress_interval(capsys) -> None:
+    loud_logger(1)
+    loud_logger(PROGRESS_INTERVAL - 1)
+    assert capsys.readouterr().err == ""
+
+    loud_logger(PROGRESS_INTERVAL)
+    assert f"{PROGRESS_INTERVAL:,}" in capsys.readouterr().err
 
 
 def test_cli_indexes_subcommand(runner: CliRunner, tmp_path: Path) -> None:
@@ -116,10 +140,7 @@ def test_cli_index_verbose(runner: CliRunner, tmp_path: Path) -> None:
     file1 = tmp_path / "a.txt"
     file1.write_text("data")
     file2 = tmp_path / "b.txt"
-    try:
-        os.link(file1, file2)
-    except OSError:
-        pytest.skip("Hard links not supported")
+    make_hardlink(file1, file2)
 
     result = runner.invoke(app, ["index", str(tmp_path)])
     assert result.exit_code == 0
@@ -130,10 +151,7 @@ def test_cli_index_quiet(runner: CliRunner, tmp_path: Path) -> None:
     file1 = tmp_path / "a.txt"
     file1.write_text("data")
     file2 = tmp_path / "b.txt"
-    try:
-        os.link(file1, file2)
-    except OSError:
-        pytest.skip("Hard links not supported")
+    make_hardlink(file1, file2)
 
     result = runner.invoke(app, ["index", "--quiet", str(tmp_path)])
     assert result.exit_code == 0
@@ -144,10 +162,7 @@ def test_cli_multi_index(runner: CliRunner, tmp_path: Path) -> None:
     file1 = tmp_path / "a.txt"
     file1.write_text("data")
     file2 = tmp_path / "b.txt"
-    try:
-        os.link(file1, file2)
-    except OSError:
-        pytest.skip("Hard links not supported")
+    make_hardlink(file1, file2)
 
     index_result = runner.invoke(app, ["index", str(tmp_path)])
     assert index_result.exit_code == 0
@@ -155,6 +170,167 @@ def test_cli_multi_index(runner: CliRunner, tmp_path: Path) -> None:
     list_result = runner.invoke(app, ["list", str(tmp_path)])
     assert list_result.exit_code == 0
     assert "[hard]" in list_result.stdout
+
+
+def test_cli_list_text_no_links_found(runner: CliRunner, tmp_path: Path) -> None:
+    runner.invoke(app, ["index", str(tmp_path)])
+    result = runner.invoke(app, ["list", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "No links found." in result.stdout
+
+
+def test_cli_list_text_quiet_no_links_found_prints_nothing(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    runner.invoke(app, ["index", str(tmp_path)])
+    result = runner.invoke(app, ["list", "--quiet", str(tmp_path)])
+    assert result.exit_code == 0
+    assert result.stdout == ""
+
+
+def test_cli_list_type_filter(runner: CliRunner, tmp_path: Path) -> None:
+    """--type/-t restricts results to the requested link kind(s)."""
+    file1 = tmp_path / "a.txt"
+    file1.write_text("data")
+    file2 = tmp_path / "b.txt"
+    make_hardlink(file1, file2)
+
+    target = tmp_path / "target.txt"
+    target.write_text("data2")
+    sym = tmp_path / "link.txt"
+    try:
+        sym.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlinks not supported on this OS")
+
+    runner.invoke(app, ["index", str(tmp_path)])
+
+    result = runner.invoke(app, ["list", "--type", "hard", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "[hard]" in result.stdout
+    assert "[sym]" not in result.stdout
+
+
+def test_cli_list_force_index_reindexes_before_search(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """--index forces a reindex before searching, even with no prior index."""
+    file1 = tmp_path / "a.txt"
+    file1.write_text("data")
+    file2 = tmp_path / "b.txt"
+    make_hardlink(file1, file2)
+
+    result = runner.invoke(app, ["list", "--index", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "[hard]" in result.stdout
+
+
+def test_cli_list_force_index_short_flag(runner: CliRunner, tmp_path: Path) -> None:
+    """-F is the short flag for force-reindex, freeing -I for --inode."""
+    file1 = tmp_path / "a.txt"
+    file1.write_text("data")
+    file2 = tmp_path / "b.txt"
+    make_hardlink(file1, file2)
+
+    result = runner.invoke(app, ["list", "-F", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "[hard]" in result.stdout
+
+
+def test_cli_group_subcommand(runner: CliRunner, tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("data")
+    sym1 = tmp_path / "sym1.txt"
+    sym2 = tmp_path / "sym2.txt"
+    try:
+        sym1.symlink_to(target)
+        sym2.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlinks not supported on this OS")
+
+    index_result = runner.invoke(app, ["index", str(tmp_path)])
+    assert index_result.exit_code == 0
+
+    group_result = runner.invoke(app, ["group", str(sym1), str(tmp_path)])
+
+    assert group_result.exit_code == 0
+    assert "[sym]" in group_result.stdout
+    assert str(sym2) in group_result.stdout
+
+
+def test_cli_group_subcommand_force_index(runner: CliRunner, tmp_path: Path) -> None:
+    """group --index forces a reindex before searching, even with no prior index."""
+    target = tmp_path / "target.txt"
+    target.write_text("data")
+    sym1 = tmp_path / "sym1.txt"
+    sym2 = tmp_path / "sym2.txt"
+    try:
+        sym1.symlink_to(target)
+        sym2.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlinks not supported on this OS")
+
+    result = runner.invoke(app, ["group", "--index", str(sym1), str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert str(sym2) in result.stdout
+
+
+def test_cli_indexes_subcommand_no_indexes_found(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    result = runner.invoke(app, ["indexes", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "No index files found." in result.stdout
+
+
+def test_cli_indexes_subcommand_multiple_indexes(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    root = tmp_path / "root"
+    mid = root / "mid"
+    sub = mid / "sub"
+    sub.mkdir(parents=True)
+
+    root_db = root / ".lnmap_index.db"
+    mid_db = mid / ".lnmap_index.db"
+    root_db.touch()
+    mid_db.touch()
+
+    result = runner.invoke(app, ["indexes", str(sub)])
+
+    assert result.exit_code == 0
+    assert str(root_db) in result.stdout
+    assert str(mid_db) in result.stdout
+
+
+def test_parse_link_types_defaults_to_all_when_none() -> None:
+    assert parse_link_types(None) == {"hard", "sym", "alias"}
+
+
+def test_parse_link_types_all_choice_expands_to_all_types() -> None:
+    assert parse_link_types([ValidTypes.ALL]) == {"hard", "sym", "alias"}
+
+
+def test_parse_link_types_explicit_subset() -> None:
+    result = parse_link_types([ValidTypes.HARDLINK, ValidTypes.SYMLINK])
+    assert result == {"hard", "sym"}
+
+
+def test_cli_list_inode_short_flag(runner: CliRunner, mock_db_dir: Path) -> None:
+    """-I is the short flag for --inode, now that force-reindex uses -F."""
+    with patch("lnmap.LinkMapper.find_links") as mock_find_links:
+        mock_find_links.return_value = []
+
+        result = runner.invoke(app, ["list", str(mock_db_dir), "-I", r"^100\d$"])
+
+        assert result.exit_code == 0
+        mock_find_links.assert_called_once()
+        _, kwargs = mock_find_links.call_args
+        assert kwargs.get("regexps") == {"inode": r"^100\d$"}
 
 
 @pytest.fixture

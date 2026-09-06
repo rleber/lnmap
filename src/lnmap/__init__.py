@@ -24,6 +24,37 @@ DEFAULT_DB_NAME = ".lnmap_index.db"
 
 UpdateMode = Iterable[str]
 
+# Locations under $HOME that macOS TCC treats as protected "other application
+# data" even for a process with broad disk access. Walking into them prompts
+# a consent popup per resource (e.g. once per app container) that a
+# non-interactive nightly job can never answer, so they're skipped proactively.
+MACOS_PROTECTED_HOME_SUBPATHS: tuple[str, ...] = (
+    "Library/Containers",
+    "Library/Group Containers",
+    "Library/CloudStorage",
+    "Library/Mail",
+    "Library/Messages",
+    "Library/Safari",
+    "Library/Calendars",
+    "Library/Application Support/AddressBook",
+    "Library/Application Support/CallHistoryDB",
+    "Library/Application Support/CallHistoryTransactions",
+    "Library/Application Support/com.apple.TCC",
+    "Library/Application Support/com.apple.sharedfilelist",
+    "Library/IdentityServices",
+    "Library/PersonalizationPortrait",
+    "Library/Suggestions",
+    "Library/Metadata/CoreSpotlight",
+)
+
+
+def _macos_protected_dirs() -> set[Path]:
+    """Absolute paths of known TCC-protected directories under the user's home."""
+    if sys.platform != "darwin":
+        return set()
+    home = Path.home().resolve()
+    return {home / sub for sub in MACOS_PROTECTED_HOME_SUBPATHS}
+
 if sys.platform == "darwin":
     try:
         from macos_alias import is_alias, target_of
@@ -227,8 +258,15 @@ class LinkMapper:
         sym_map: dict[Path, list[Path]] = defaultdict(list)
         alias_map: dict[Path, list[Path]] = defaultdict(list)
         scanned_count = 0
+        protected_dirs = _macos_protected_dirs()
 
-        for root_str, _, filenames in os.walk(scan_directory):
+        for root_str, dirnames, filenames in os.walk(scan_directory):
+            if protected_dirs:
+                root_path = Path(root_str)
+                dirnames[:] = [
+                    d for d in dirnames if (root_path / d) not in protected_dirs
+                ]
+
             for fname in filenames:
                 path = Path(root_str) / fname
                 # Construct canonical resolved path without following symlink if `path` is a symlink
