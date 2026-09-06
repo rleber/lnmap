@@ -29,6 +29,12 @@ dependencies = [
     "macos-alias>=0.1.0; sys_platform == 'darwin'",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+]
+
 [project.scripts]
 lnmap = "lnmap.cli:main"
 
