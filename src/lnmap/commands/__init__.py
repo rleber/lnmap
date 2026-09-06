@@ -1,8 +1,8 @@
 """CLI commands for lnmap, each registered onto a shared Typer app.
 
 Every command lives in its own module (index.py, list_links.py, group.py,
-indexes.py, init.py) and registers itself onto `app` via the @app.command()
-decorator when imported below.
+indexes.py, init.py, check.py) and registers itself onto `app` via the
+@app.command() decorator when imported below.
 """
 
 from typing import Annotated
@@ -43,4 +43,4 @@ def global_options(
 
 # Imported for their side effect of registering commands onto `app`; must
 # follow the `app` definition above, since each module does `from . import app`.
-from . import group, index, indexes, init, list_links  # noqa: F401
+from . import check, group, index, indexes, init, list_links  # noqa: F401

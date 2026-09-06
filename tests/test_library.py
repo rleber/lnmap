@@ -3,6 +3,7 @@ import sqlite3
 import stat
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -328,6 +329,55 @@ def test_index_skips_its_own_database_file(root_dir: Path) -> None:
     mapper = LinkMapper(root_dir)
     links = mapper.find_links(include={"hard"})
     assert links == []
+
+
+def test_index_leaves_no_breadcrumb_after_success(root_dir: Path) -> None:
+    """A clean, complete run must not leave a stale in-progress breadcrumb."""
+    (root_dir / "file.txt").write_text("hello")
+
+    LinkMapper.index(root_dir, print)
+
+    assert not LinkMapper.progress_for(root_dir).exists()
+
+
+def test_index_skips_its_own_breadcrumb_file(root_dir: Path) -> None:
+    """A stale breadcrumb left by a prior interrupted run must not itself be
+    treated as scan data once a new run picks it back up."""
+    progress_path = LinkMapper.progress_for(root_dir)
+    progress_path.write_text(str(root_dir))
+    sibling = root_dir / "also_progress.txt"
+    make_hardlink(progress_path, sibling)
+
+    LinkMapper.index(root_dir, print)
+
+    mapper = LinkMapper(root_dir)
+    assert mapper.find_links(include={"hard"}) == []
+
+
+def test_index_leaves_breadcrumb_when_scan_is_interrupted(root_dir: Path) -> None:
+    """If something goes wrong partway through a scan, the breadcrumb showing
+    where it was must survive -- only a fully successful run clears it."""
+    sub = root_dir / "sub"
+    sub.mkdir()
+    poison = sub / "poison.txt"
+    poison.write_text("hello")
+
+    real_is_file = Path.is_file
+
+    def boom(self: Path) -> bool:
+        if self == poison:
+            raise RuntimeError("simulated crash")
+        return real_is_file(self)
+
+    with (
+        pytest.raises(RuntimeError, match="simulated crash"),
+        patch.object(Path, "is_file", boom),
+    ):
+        LinkMapper.index(root_dir, print)
+
+    progress_path = LinkMapper.progress_for(root_dir)
+    assert progress_path.exists()
+    assert progress_path.read_text().strip() == str(sub)
 
 
 def test_index_records_dangling_symlink(root_dir: Path) -> None:

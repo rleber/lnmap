@@ -22,6 +22,7 @@ import re2  # Use google-re2 to protect against ReDOS attack
 from .config import protected_subpaths
 
 DEFAULT_DB_NAME = ".lnmap_index.db"
+PROGRESS_FILE_NAME = ".lnmap_index.progress"
 
 if sys.platform == "darwin":
     try:
@@ -84,6 +85,7 @@ class LinkMapper:
         """
         scan_directory = scan_directory.resolve()
         resolved_db_path = LinkMapper.db_for(scan_directory)
+        progress_path = LinkMapper.progress_for(scan_directory)
 
         inode_map: dict[int, list[Path]] = defaultdict(list)
         sym_map: dict[Path, list[Path]] = defaultdict(list)
@@ -98,6 +100,11 @@ class LinkMapper:
                     d for d in dirnames if (root_path / d) not in protected_dirs
                 ]
 
+            # Overwritten on every directory entered, so it always names the
+            # directory index() is currently in. If the process dies before
+            # reaching the successful cleanup below, this is what's left.
+            progress_path.write_text(root_str)
+
             for fname in filenames:
                 path = Path(root_str) / fname
                 # Construct canonical resolved path without following symlink if `path` is a symlink
@@ -106,7 +113,7 @@ class LinkMapper:
                 else:
                     abs_p = path.resolve()
 
-                if abs_p == resolved_db_path:
+                if abs_p in (resolved_db_path, progress_path):
                     continue
 
                 scanned_count += 1
@@ -161,6 +168,9 @@ class LinkMapper:
         LinkMapper._save_to_db(
             resolved_db_path, hard_records, sym_records, alias_records
         )
+
+        # Reached only on a clean, complete run -- nothing left to report as stuck.
+        progress_path.unlink(missing_ok=True)
 
     def find_links(
         self, include: set[str], regexps: dict[str, str] | None = None
@@ -323,6 +333,17 @@ class LinkMapper:
     def db_for(directory: Path) -> Path:
         """Returns the name of the index database corresponding to a directory"""
         return Path(directory) / DEFAULT_DB_NAME
+
+    @staticmethod
+    def progress_for(directory: Path) -> Path:
+        """Returns the path of the in-progress-scan breadcrumb file for a directory.
+
+        index() writes the directory it's currently scanning here as it
+        goes, and removes the file on successful completion. If a run dies
+        partway through (hangs and gets killed, crashes, etc.), whatever was
+        last written stays behind, identifying where it got stuck.
+        """
+        return Path(directory) / PROGRESS_FILE_NAME
 
     TABLE_FIELDS: typing.ClassVar = {
         "hard_links": ["inode", "path"],

@@ -8,7 +8,7 @@ import yaml
 from conftest import make_hardlink
 from typer.testing import CliRunner
 
-from lnmap import Link
+from lnmap import Link, LinkMapper
 from lnmap.cli import app
 from lnmap.support.link_types import ValidTypes, parse_link_types
 from lnmap.support.output import format_links_as_yaml
@@ -501,3 +501,38 @@ def test_cli_init_does_not_overwrite_existing_config(
     assert yaml.safe_load(isolated_lnmap_config.read_text()) == {
         "protected_dirs": ["Custom/Dir"]
     }
+
+
+# --- Tests for the `check` command ---
+
+
+def test_cli_check_reports_no_breadcrumb_after_clean_index(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    file1 = tmp_path / "a.txt"
+    file1.write_text("data")
+    file2 = tmp_path / "b.txt"
+    make_hardlink(file1, file2)
+
+    index_result = runner.invoke(app, ["index", str(tmp_path)])
+    assert index_result.exit_code == 0
+
+    result = runner.invoke(app, ["check", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "No incomplete-scan breadcrumb" in result.stdout
+
+
+def test_cli_check_reports_leftover_breadcrumb(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """check must surface a breadcrumb left behind by an interrupted run."""
+    stuck_dir = tmp_path / "stuck_here"
+    stuck_dir.mkdir()
+    LinkMapper.progress_for(tmp_path).write_text(str(stuck_dir))
+
+    result = runner.invoke(app, ["check", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "did not complete" in result.stdout
+    assert str(stuck_dir) in result.stdout
