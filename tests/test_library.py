@@ -3,17 +3,15 @@ import sqlite3
 import stat
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
+import yaml
 from conftest import make_hardlink
 
-from lnmap import (
-    HAS_MACOS_ALIAS,
-    MACOS_PROTECTED_HOME_SUBPATHS,
-    Link,
-    LinkMapper,
-    _macos_protected_dirs,
-)
+from lnmap import Link, LinkMapper
+from lnmap.config import default_config
+from lnmap.link_mapper import HAS_MACOS_ALIAS, _macos_protected_dirs
 
 needs_macos_alias = pytest.mark.skipif(
     not HAS_MACOS_ALIAS, reason="macos-alias package not available"
@@ -21,6 +19,83 @@ needs_macos_alias = pytest.mark.skipif(
 darwin_only = pytest.mark.skipif(
     sys.platform != "darwin", reason="macOS-specific behavior"
 )
+
+
+@pytest.fixture
+def mock_db_mapper(tmp_path: Path) -> LinkMapper:
+    """Fixture providing a LinkMapper initialized with a populated SQLite database for testing."""
+    base_dir = tmp_path / "app"
+    base_dir.mkdir()
+    db_path = base_dir / ".lnmap_index.db"
+
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "CREATE TABLE hard_links (inode INTEGER NOT NULL, path TEXT NOT NULL);"
+        )
+        cursor.execute(
+            "CREATE TABLE sym_links (target TEXT NOT NULL, path TEXT NOT NULL);"
+        )
+        cursor.execute(
+            "CREATE TABLE alias_links (target TEXT NOT NULL, path TEXT NOT NULL);"
+        )
+
+        # Hard links setup (Shared inode 1001)
+        cursor.executemany(
+            "INSERT INTO hard_links VALUES (?, ?);",
+            [
+                (1001, str(base_dir / "hard1.txt")),
+                (1001, str(base_dir / "hard2.txt")),
+                (2002, str(base_dir / "other_hard.txt")),
+            ],
+        )
+
+        # Symlinks setup
+        cursor.executemany(
+            "INSERT INTO sym_links VALUES (?, ?);",
+            [
+                (str(base_dir / "targets" / "doc.pdf"), str(base_dir / "sym1.pdf")),
+                (str(base_dir / "targets" / "doc.pdf"), str(base_dir / "sym2.pdf")),
+            ],
+        )
+
+        # Alias setup
+        cursor.executemany(
+            "INSERT INTO alias_links VALUES (?, ?);",
+            [
+                (str(base_dir / "targets" / "doc.pdf"), str(base_dir / "alias1.pdf")),
+            ],
+        )
+        conn.commit()
+
+    return LinkMapper(directory=base_dir, db_path=db_path)
+
+
+def _make_empty_db(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE hard_links (inode INTEGER NOT NULL, path TEXT NOT NULL);"
+        )
+        conn.execute(
+            "CREATE TABLE sym_links (target TEXT NOT NULL, path TEXT NOT NULL);"
+        )
+        conn.execute(
+            "CREATE TABLE alias_links (target TEXT NOT NULL, path TEXT NOT NULL);"
+        )
+        conn.commit()
+
+
+# --- Tests for LinkMapper() construction ---
+
+
+def test_link_mapper_init_raises_for_non_directory(root_dir: Path) -> None:
+    not_a_dir = root_dir / "file.txt"
+    not_a_dir.write_text("data")
+    with pytest.raises(ValueError, match="not a valid directory"):
+        LinkMapper(not_a_dir)
+
+
+# --- Tests for index discovery (indexes / index_for) ---
 
 
 def test_indexes_traversal(root_dir: Path) -> None:
@@ -46,17 +121,6 @@ def test_indexes_returns_index_in_target_directory_itself(root_dir: Path) -> Non
     assert found[0].path == idx
 
 
-def test_indexes_returns_empty_list_when_none_found(root_dir: Path) -> None:
-    assert LinkMapper.indexes(root_dir) == []
-
-
-def test_indexes_raises_for_non_directory(root_dir: Path) -> None:
-    not_a_dir = root_dir / "file.txt"
-    not_a_dir.write_text("data")
-    with pytest.raises(ValueError, match="not a valid directory"):
-        LinkMapper.indexes(not_a_dir)
-
-
 def test_indexes_collects_multiple_ancestors(root_dir: Path) -> None:
     """Index files at more than one level above the target are all reported."""
     sub = root_dir / "a" / "b"
@@ -68,6 +132,10 @@ def test_indexes_collects_multiple_ancestors(root_dir: Path) -> None:
 
     found = LinkMapper.indexes(sub)
     assert {idx.path for idx in found} == {root_idx, mid_idx}
+
+
+def test_indexes_returns_empty_list_when_none_found(root_dir: Path) -> None:
+    assert LinkMapper.indexes(root_dir) == []
 
 
 def test_index_for_falls_back_when_no_index_exists(root_dir: Path) -> None:
@@ -107,11 +175,14 @@ def test_index_for_prefers_closest_directory_on_tie(root_dir: Path) -> None:
     assert LinkMapper.index_for(sub) == newer
 
 
-def test_link_mapper_init_raises_for_non_directory(root_dir: Path) -> None:
+def test_indexes_raises_for_non_directory(root_dir: Path) -> None:
     not_a_dir = root_dir / "file.txt"
     not_a_dir.write_text("data")
     with pytest.raises(ValueError, match="not a valid directory"):
-        LinkMapper(not_a_dir)
+        LinkMapper.indexes(not_a_dir)
+
+
+# --- Tests for index() scanning ---
 
 
 def test_hard_link_indexing(root_dir: Path) -> None:
@@ -149,105 +220,6 @@ def test_hard_link_indexing_three_way(root_dir: Path) -> None:
 
     assert len(links) == 1
     assert set(links[0].paths) == {file1, file2, file3}
-
-
-def test_unlinked_file_not_indexed_as_hard_link(root_dir: Path) -> None:
-    """A regular file with no other hard links must not appear in results."""
-    (root_dir / "solo.txt").write_text("hello")
-
-    LinkMapper.index(root_dir, print)
-
-    mapper = LinkMapper(root_dir)
-    links = mapper.find_links(include={"hard"})
-
-    assert links == []
-
-
-def test_reindex_drops_stale_entries(root_dir: Path) -> None:
-    """Running index() again must reflect the current filesystem, not accumulate."""
-    file1 = root_dir / "file1.txt"
-    file1.write_text("hello")
-    file2 = root_dir / "file2.txt"
-    make_hardlink(file1, file2)
-
-    LinkMapper.index(root_dir, print)
-    mapper = LinkMapper(root_dir)
-    assert len(mapper.find_links(include={"hard"})) == 1
-
-    file2.unlink()
-
-    LinkMapper.index(root_dir, print)
-    assert mapper.find_links(include={"hard"}) == []
-
-
-def test_index_skips_its_own_database_file(root_dir: Path) -> None:
-    """The .lnmap_index.db file itself must never be treated as scan data."""
-    db_path = LinkMapper.db_for(root_dir)
-    db_path.touch()
-    sibling = root_dir / "also_db.txt"
-    make_hardlink(db_path, sibling)
-
-    LinkMapper.index(root_dir, print)
-
-    mapper = LinkMapper(root_dir)
-    links = mapper.find_links(include={"hard"})
-    assert links == []
-
-
-def test_index_records_dangling_symlink(root_dir: Path) -> None:
-    """A symlink to a non-existent target must not crash the scan.
-
-    Path.resolve() doesn't raise just because the target is missing (only for
-    permission-style errors on an intermediate component), so index() records
-    it with its literal, non-existent target rather than skipping it. This
-    locks in that actual behavior so a refactor doesn't change it by accident.
-    """
-    sym = root_dir / "broken.txt"
-    missing_target = root_dir / "does_not_exist.txt"
-    try:
-        sym.symlink_to(missing_target)
-    except (OSError, NotImplementedError):
-        pytest.skip("Symlinks not supported on this OS")
-
-    LinkMapper.index(root_dir, print)
-
-    mapper = LinkMapper(root_dir)
-    links = mapper.find_links(include={"sym"})
-
-    assert len(links) == 1
-    assert links[0].target == missing_target
-    assert links[0].paths == (sym,)
-
-
-def test_index_skips_unreadable_directory(root_dir: Path) -> None:
-    """A directory with no read/execute permission must not abort the scan."""
-    if sys.platform == "win32":
-        pytest.skip("chmod-based permission restriction not applicable on Windows")
-    if hasattr(os, "geteuid") and os.geteuid() == 0:
-        pytest.skip("Permission restrictions don't apply when running as root")
-
-    visible_file = root_dir / "file1.txt"
-    visible_file.write_text("hello")
-    visible_link = root_dir / "file2.txt"
-    make_hardlink(visible_file, visible_link)
-
-    locked_dir = root_dir / "locked"
-    locked_dir.mkdir()
-    locked_file = locked_dir / "secret1.txt"
-    locked_file.write_text("secret")
-    make_hardlink(locked_file, locked_dir / "secret2.txt")
-    locked_dir.chmod(0)
-
-    try:
-        LinkMapper.index(root_dir, print)
-    finally:
-        locked_dir.chmod(stat.S_IRWXU)
-
-    mapper = LinkMapper(root_dir)
-    links = mapper.find_links(include={"hard"})
-
-    assert len(links) == 1
-    assert set(links[0].paths) == {visible_file, visible_link}
 
 
 def test_symlink_indexing(root_dir: Path) -> None:
@@ -316,6 +288,157 @@ def test_alias_indexing_groups_multiple_aliases_to_same_target(root_dir: Path) -
     assert set(links[0].paths) == {alias1, alias2}
 
 
+def test_reindex_drops_stale_entries(root_dir: Path) -> None:
+    """Running index() again must reflect the current filesystem, not accumulate."""
+    file1 = root_dir / "file1.txt"
+    file1.write_text("hello")
+    file2 = root_dir / "file2.txt"
+    make_hardlink(file1, file2)
+
+    LinkMapper.index(root_dir, print)
+    mapper = LinkMapper(root_dir)
+    assert len(mapper.find_links(include={"hard"})) == 1
+
+    file2.unlink()
+
+    LinkMapper.index(root_dir, print)
+    assert mapper.find_links(include={"hard"}) == []
+
+
+def test_unlinked_file_not_indexed_as_hard_link(root_dir: Path) -> None:
+    """A regular file with no other hard links must not appear in results."""
+    (root_dir / "solo.txt").write_text("hello")
+
+    LinkMapper.index(root_dir, print)
+
+    mapper = LinkMapper(root_dir)
+    links = mapper.find_links(include={"hard"})
+
+    assert links == []
+
+
+def test_index_skips_its_own_database_file(root_dir: Path) -> None:
+    """The .lnmap_index.db file itself must never be treated as scan data."""
+    db_path = LinkMapper.db_for(root_dir)
+    db_path.touch()
+    sibling = root_dir / "also_db.txt"
+    make_hardlink(db_path, sibling)
+
+    LinkMapper.index(root_dir, print)
+
+    mapper = LinkMapper(root_dir)
+    links = mapper.find_links(include={"hard"})
+    assert links == []
+
+
+def test_index_leaves_no_breadcrumb_after_success(root_dir: Path) -> None:
+    """A clean, complete run must not leave a stale in-progress breadcrumb."""
+    (root_dir / "file.txt").write_text("hello")
+
+    LinkMapper.index(root_dir, print)
+
+    assert not LinkMapper.progress_for(root_dir).exists()
+
+
+def test_index_skips_its_own_breadcrumb_file(root_dir: Path) -> None:
+    """A stale breadcrumb left by a prior interrupted run must not itself be
+    treated as scan data once a new run picks it back up."""
+    progress_path = LinkMapper.progress_for(root_dir)
+    progress_path.write_text(str(root_dir))
+    sibling = root_dir / "also_progress.txt"
+    make_hardlink(progress_path, sibling)
+
+    LinkMapper.index(root_dir, print)
+
+    mapper = LinkMapper(root_dir)
+    assert mapper.find_links(include={"hard"}) == []
+
+
+def test_index_leaves_breadcrumb_when_scan_is_interrupted(root_dir: Path) -> None:
+    """If something goes wrong partway through a scan, the breadcrumb showing
+    where it was must survive -- only a fully successful run clears it."""
+    sub = root_dir / "sub"
+    sub.mkdir()
+    poison = sub / "poison.txt"
+    poison.write_text("hello")
+
+    real_is_file = Path.is_file
+
+    def boom(self: Path) -> bool:
+        if self == poison:
+            raise RuntimeError("simulated crash")
+        return real_is_file(self)
+
+    with (
+        pytest.raises(RuntimeError, match="simulated crash"),
+        patch.object(Path, "is_file", boom),
+    ):
+        LinkMapper.index(root_dir, print)
+
+    progress_path = LinkMapper.progress_for(root_dir)
+    assert progress_path.exists()
+    assert progress_path.read_text().strip() == str(sub)
+
+
+def test_index_records_dangling_symlink(root_dir: Path) -> None:
+    """A symlink to a non-existent target must not crash the scan.
+
+    Path.resolve() doesn't raise just because the target is missing (only for
+    permission-style errors on an intermediate component), so index() records
+    it with its literal, non-existent target rather than skipping it. This
+    locks in that actual behavior so a refactor doesn't change it by accident.
+    """
+    sym = root_dir / "broken.txt"
+    missing_target = root_dir / "does_not_exist.txt"
+    try:
+        sym.symlink_to(missing_target)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlinks not supported on this OS")
+
+    LinkMapper.index(root_dir, print)
+
+    mapper = LinkMapper(root_dir)
+    links = mapper.find_links(include={"sym"})
+
+    assert len(links) == 1
+    assert links[0].target == missing_target
+    assert links[0].paths == (sym,)
+
+
+def test_index_skips_unreadable_directory(root_dir: Path) -> None:
+    """A directory with no read/execute permission must not abort the scan."""
+    if sys.platform == "win32":
+        pytest.skip("chmod-based permission restriction not applicable on Windows")
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("Permission restrictions don't apply when running as root")
+
+    visible_file = root_dir / "file1.txt"
+    visible_file.write_text("hello")
+    visible_link = root_dir / "file2.txt"
+    make_hardlink(visible_file, visible_link)
+
+    locked_dir = root_dir / "locked"
+    locked_dir.mkdir()
+    locked_file = locked_dir / "secret1.txt"
+    locked_file.write_text("secret")
+    make_hardlink(locked_file, locked_dir / "secret2.txt")
+    locked_dir.chmod(0)
+
+    try:
+        LinkMapper.index(root_dir, print)
+    finally:
+        locked_dir.chmod(stat.S_IRWXU)
+
+    mapper = LinkMapper(root_dir)
+    links = mapper.find_links(include={"hard"})
+
+    assert len(links) == 1
+    assert set(links[0].paths) == {visible_file, visible_link}
+
+
+# --- Tests for macOS protected-dir pruning ---
+
+
 @darwin_only
 def test_index_skips_macos_protected_dirs(home_dir: Path) -> None:
     """Hard links inside known TCC-protected locations (e.g. app containers)
@@ -344,7 +467,10 @@ def test_index_skips_macos_protected_dirs(home_dir: Path) -> None:
 def test_index_skips_multi_segment_protected_dir(home_dir: Path) -> None:
     """A protected path nested two levels deep (e.g. Application Support/AddressBook)
     is pruned too, not just top-level Library children."""
-    assert "Library/Application Support/AddressBook" in MACOS_PROTECTED_HOME_SUBPATHS
+    assert (
+        "Library/Application Support/AddressBook"
+        in default_config()["protected_dirs"]
+    )
 
     protected_dir = home_dir / "Library" / "Application Support" / "AddressBook"
     protected_dir.mkdir(parents=True)
@@ -356,6 +482,39 @@ def test_index_skips_multi_segment_protected_dir(home_dir: Path) -> None:
 
     mapper = LinkMapper(home_dir)
     assert mapper.find_links(include={"hard"}) == []
+
+
+@darwin_only
+def test_index_honors_customized_protected_dirs_config(
+    home_dir: Path, isolated_lnmap_config: Path
+) -> None:
+    """Editing the config file's protected_dirs list actually changes what
+    index() prunes -- the whole point of moving the list out of source code."""
+    isolated_lnmap_config.write_text(yaml.dump({"protected_dirs": ["Quarantine"]}))
+
+    # Not in the (now overridden) config, so it must be scanned like any
+    # other directory, even though it's in the original hardcoded default.
+    formerly_protected = home_dir / "Library" / "Containers"
+    formerly_protected.mkdir(parents=True)
+    visible1 = formerly_protected / "file1.txt"
+    visible1.write_text("hello")
+    make_hardlink(visible1, formerly_protected / "file2.txt")
+
+    # In the overridden config, so it must be pruned even though it was
+    # never part of the original hardcoded default.
+    newly_protected = home_dir / "Quarantine"
+    newly_protected.mkdir()
+    hidden1 = newly_protected / "file1.txt"
+    hidden1.write_text("hello")
+    make_hardlink(hidden1, newly_protected / "file2.txt")
+
+    LinkMapper.index(home_dir, print)
+
+    mapper = LinkMapper(home_dir)
+    links = mapper.find_links(include={"hard"})
+
+    assert len(links) == 1
+    assert set(links[0].paths) == {visible1, formerly_protected / "file2.txt"}
 
 
 def test_protected_dirs_empty_off_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -372,66 +531,21 @@ def test_protected_dirs_resolved_against_home(home_dir: Path) -> None:
     assert all(str(p).startswith(str(home_dir)) for p in protected)
 
 
-@pytest.fixture
-def mock_db_mapper(tmp_path: Path) -> LinkMapper:
-    """Fixture providing a LinkMapper initialized with a populated SQLite database for testing."""
-    base_dir = tmp_path / "app"
-    base_dir.mkdir()
-    db_path = base_dir / ".lnmap_index.db"
-
-    with sqlite3.connect(db_path) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "CREATE TABLE hard_links (inode INTEGER NOT NULL, path TEXT NOT NULL);"
-        )
-        cursor.execute(
-            "CREATE TABLE sym_links (target TEXT NOT NULL, path TEXT NOT NULL);"
-        )
-        cursor.execute(
-            "CREATE TABLE alias_links (target TEXT NOT NULL, path TEXT NOT NULL);"
-        )
-
-        # Hard links setup (Shared inode 1001)
-        cursor.executemany(
-            "INSERT INTO hard_links VALUES (?, ?);",
-            [
-                (1001, str(base_dir / "hard1.txt")),
-                (1001, str(base_dir / "hard2.txt")),
-                (2002, str(base_dir / "other_hard.txt")),
-            ],
-        )
-
-        # Symlinks setup
-        cursor.executemany(
-            "INSERT INTO sym_links VALUES (?, ?);",
-            [
-                (str(base_dir / "targets" / "doc.pdf"), str(base_dir / "sym1.pdf")),
-                (str(base_dir / "targets" / "doc.pdf"), str(base_dir / "sym2.pdf")),
-            ],
-        )
-
-        # Alias setup
-        cursor.executemany(
-            "INSERT INTO alias_links VALUES (?, ?);",
-            [
-                (str(base_dir / "targets" / "doc.pdf"), str(base_dir / "alias1.pdf")),
-            ],
-        )
-        conn.commit()
-
-    return LinkMapper(directory=base_dir, db_path=db_path)
+# --- Tests for the Link dataclass ---
 
 
-def test_link_inode_property_for_hard_link() -> None:
-    link = Link(link_type="hard", key=42, paths=(Path("/a"), Path("/b")))
+def test_link_hard_link_fields() -> None:
+    link = Link(link_type="hard", inode=42, paths=(Path("/a"), Path("/b")))
     assert link.inode == 42
     assert link.target is None
+    assert link.key == 42
 
 
-def test_link_target_property_for_symlink() -> None:
-    link = Link(link_type="sym", key=Path("/target"), paths=(Path("/link"),))
+def test_link_symlink_fields() -> None:
+    link = Link(link_type="sym", target=Path("/target"), paths=(Path("/link"),))
     assert link.inode is None
     assert link.target == Path("/target")
+    assert link.key == Path("/target")
 
 
 # --- Tests for find_links (directory scoping) ---
@@ -544,6 +658,13 @@ def test_find_links_multiple_regex_criteria(mock_db_mapper: LinkMapper) -> None:
     assert results[0].paths[0].name == "sym1.pdf"
 
 
+def test_find_links_empty_include_returns_empty_list(
+    mock_db_mapper: LinkMapper,
+) -> None:
+    results = mock_db_mapper.find_links(include=set(), regexps={"path": r".*"})
+    assert results == []
+
+
 def test_find_links_invalid_regex_field_raises_value_error(
     mock_db_mapper: LinkMapper,
 ) -> None:
@@ -564,13 +685,6 @@ def test_find_links_exceeding_max_re_length_raises_value_error(
 def test_re2_regexp_invalid_pattern_returns_false() -> None:
     invalid_pattern = r"(unclosed_parenthesis"
     assert LinkMapper.re2_regexp(invalid_pattern, "test_string") is False
-
-
-def test_find_links_empty_include_returns_empty_list(
-    mock_db_mapper: LinkMapper,
-) -> None:
-    results = mock_db_mapper.find_links(include=set(), regexps={"path": r".*"})
-    assert results == []
 
 
 # --- Tests for find_group ---
@@ -649,20 +763,6 @@ def test_find_group_non_existent_target(mock_db_mapper: LinkMapper) -> None:
         include={"hard", "sym", "alias"}, target=target_path
     )
     assert results == []
-
-
-def _make_empty_db(db_path: Path) -> None:
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            "CREATE TABLE hard_links (inode INTEGER NOT NULL, path TEXT NOT NULL);"
-        )
-        conn.execute(
-            "CREATE TABLE sym_links (target TEXT NOT NULL, path TEXT NOT NULL);"
-        )
-        conn.execute(
-            "CREATE TABLE alias_links (target TEXT NOT NULL, path TEXT NOT NULL);"
-        )
-        conn.commit()
 
 
 def test_find_group_hard_link_raises_for_conflicting_inodes(tmp_path: Path) -> None:

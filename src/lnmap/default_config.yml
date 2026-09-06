@@ -1,0 +1,29 @@
+# Default lnmap configuration.
+#
+# This file is copied verbatim to seed a new ~/.lnmap_config.yml (or the
+# path named by $LNMAP_CONFIG) the first time lnmap needs one. Editing your
+# own config file has no effect on this one; edit this file only to change
+# what new lnmap installs start with.
+
+# Locations under $HOME that macOS TCC treats as protected "other
+# application data" even for a process with broad disk access. Walking
+# into them during `lnmap index` prompts a consent popup per resource (e.g.
+# once per app container) that a non-interactive nightly job can never
+# answer, so they're skipped by default.
+protected_dirs:
+  - Library/Containers
+  - Library/Group Containers
+  - Library/CloudStorage
+  - Library/Mail
+  - Library/Messages
+  - Library/Safari
+  - Library/Calendars
+  - Library/Application Support/AddressBook
+  - Library/Application Support/CallHistoryDB
+  - Library/Application Support/CallHistoryTransactions
+  - Library/Application Support/com.apple.TCC
+  - Library/Application Support/com.apple.sharedfilelist
+  - Library/IdentityServices
+  - Library/PersonalizationPortrait
+  - Library/Suggestions
+  - Library/Metadata/CoreSpotlight
