@@ -13,6 +13,7 @@
 protected_dirs:
   - Library/Containers
   - Library/Group Containers
+  - Library/Application Scripts
   - Library/CloudStorage
   - Library/Mail
   - Library/Messages
@@ -23,6 +24,8 @@ protected_dirs:
   - Library/Application Support/CallHistoryTransactions
   - Library/Application Support/com.apple.TCC
   - Library/Application Support/com.apple.sharedfilelist
+  - Library/Application Support/1Password
+  - Library/Application Support/1Password 4
   - Library/IdentityServices
   - Library/PersonalizationPortrait
   - Library/Suggestions

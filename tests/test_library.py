@@ -485,6 +485,31 @@ def test_index_skips_multi_segment_protected_dir(home_dir: Path) -> None:
 
 
 @darwin_only
+def test_index_skips_1password_and_application_scripts(home_dir: Path) -> None:
+    """Regression test for a real incident: ~/Library/Application Support/1Password
+    (a large folder of keychain backups) and ~/Library/Application Scripts (a
+    general sandboxed-app-script location, not 1Password-specific) both
+    triggered a live TCC "access data from other applications" prompt during
+    a nightly run before being added to the default protected_dirs list."""
+    for relative in (
+        "Library/Application Support/1Password",
+        "Library/Application Scripts",
+    ):
+        assert relative in default_config()["protected_dirs"]
+
+        protected_dir = home_dir / relative
+        protected_dir.mkdir(parents=True)
+        hidden1 = protected_dir / "file1.txt"
+        hidden1.write_text("hello")
+        make_hardlink(hidden1, protected_dir / "file2.txt")
+
+    LinkMapper.index(home_dir, print)
+
+    mapper = LinkMapper(home_dir)
+    assert mapper.find_links(include={"hard"}) == []
+
+
+@darwin_only
 def test_index_honors_customized_protected_dirs_config(
     home_dir: Path, isolated_lnmap_config: Path
 ) -> None:
